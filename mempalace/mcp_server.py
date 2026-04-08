@@ -25,13 +25,18 @@ import logging
 import hashlib
 from datetime import datetime
 
-from .config import MempalaceConfig
-from .version import __version__
-from .searcher import search_memories
-from .palace_graph import traverse, find_tunnels, graph_stats
-import chromadb
+# Redirect stdout to stderr BEFORE any imports that might print,
+# so module-level init (ChromaDB, KnowledgeGraph) can't corrupt JSON-RPC.
+_rpc_out = sys.stdout
+sys.stdout = sys.stderr
 
-from .knowledge_graph import KnowledgeGraph
+from .config import MempalaceConfig  # noqa: E402
+from .version import __version__  # noqa: E402
+from .searcher import search_memories  # noqa: E402
+from .palace_graph import traverse, find_tunnels, graph_stats  # noqa: E402
+import chromadb  # noqa: E402
+
+from .knowledge_graph import KnowledgeGraph  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -791,10 +796,6 @@ def handle_request(request):
 
 
 def main():
-    # Redirect stdout to stderr so stray prints from libraries (ChromaDB, etc.)
-    # don't contaminate the JSON-RPC transport. Use _rpc_out for protocol writes.
-    _rpc_out = sys.stdout
-    sys.stdout = sys.stderr
     logger.info("MemPalace MCP Server starting...")
     while True:
         try:
