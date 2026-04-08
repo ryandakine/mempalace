@@ -101,11 +101,13 @@ class TestTimeline:
         assert "Max" in subjects_and_objects
 
     def test_timeline_global_has_limit(self, kg):
-        # Add > 100 triples
+        # Add > default limit triples
         for i in range(105):
             kg.add_triple(f"entity_{i}", "relates_to", f"entity_{i + 1}")
         tl = kg.timeline()
-        assert len(tl) == 100  # LIMIT 100
+        assert len(tl) == 105  # Default limit is 500, so 105 all returned
+        tl_limited = kg.timeline(limit=50)
+        assert len(tl_limited) == 50  # Custom limit honored
 
     def test_timeline_entity_has_limit(self, kg):
         # Add > 100 triples all connected to a single entity
@@ -114,7 +116,9 @@ class TestTimeline:
                 "hub", "connects_to", f"spoke_{i}", valid_from=f"2025-01-{(i % 28) + 1:02d}"
             )
         tl = kg.timeline("hub")
-        assert len(tl) == 100  # LIMIT 100 on entity-filtered branch
+        assert len(tl) == 105  # Default limit is 500, so 105 all returned
+        tl_limited = kg.timeline("hub", limit=10)
+        assert len(tl_limited) == 10  # Custom limit honored
 
 
 class TestWALMode:

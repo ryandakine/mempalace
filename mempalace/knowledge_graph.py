@@ -91,6 +91,14 @@ class KnowledgeGraph:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
+    # Predicates where only one open triple per subject should exist.
+    # Adding a new triple auto-invalidates the old one.
+    EXCLUSIVE_PREDICATES = {
+        "works_at", "lives_in", "lives_at", "married_to", "engaged_to",
+        "dating", "job_title", "current_role", "enrolled_at", "studies_at",
+        "bankroll_is", "current_stake", "plays_at",
+    }
+
     def _entity_id(self, name: str) -> str:
         return name.lower().replace(" ", "_").replace("'", "")
 
@@ -146,6 +154,20 @@ class KnowledgeGraph:
         if existing:
             conn.close()
             return existing[0]  # Already exists and still valid
+
+        # Auto-invalidate conflicting exclusive predicates
+        if pred in self.EXCLUSIVE_PREDICATES:
+            conflicting = conn.execute(
+                "SELECT id, object FROM triples WHERE subject=? AND predicate=? AND valid_to IS NULL AND object != ?",
+                (sub_id, pred, obj_id),
+            ).fetchall()
+            if conflicting:
+                now = valid_from or date.today().isoformat()
+                for conflict_id, _ in conflicting:
+                    conn.execute(
+                        "UPDATE triples SET valid_to=? WHERE id=?",
+                        (now, conflict_id),
+                    )
 
         triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.md5(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:8]}"
 
@@ -273,7 +295,40 @@ class KnowledgeGraph:
         conn.close()
         return results
 
-    def timeline(self, entity_name: str = None):
+    def find_contradictions(self, predicates: list = None) -> list:
+        """Find entities with multiple open triples for exclusive predicates."""
+        check_preds = predicates or list(self.EXCLUSIVE_PREDICATES)
+        conn = self._conn()
+        results = []
+        for pred in check_preds:
+            rows = conn.execute("""
+                SELECT s.name, t1.predicate,
+                       o1.name as obj1_name, t1.valid_from,
+                       o2.name as obj2_name, t2.valid_from
+                FROM triples t1
+                JOIN triples t2 ON t1.subject = t2.subject
+                    AND t1.predicate = t2.predicate
+                    AND t1.id < t2.id
+                    AND t1.valid_to IS NULL
+                    AND t2.valid_to IS NULL
+                JOIN entities s ON t1.subject = s.id
+                JOIN entities o1 ON t1.object = o1.id
+                JOIN entities o2 ON t2.object = o2.id
+                WHERE t1.predicate = ?
+            """, (pred,)).fetchall()
+            for row in rows:
+                results.append({
+                    "subject": row[0],
+                    "predicate": row[1],
+                    "value_a": row[2],
+                    "value_a_from": row[3],
+                    "value_b": row[4],
+                    "value_b_from": row[5],
+                })
+        conn.close()
+        return results
+
+    def timeline(self, entity_name: str = None, limit: int = 500):
         """Get all facts in chronological order, optionally filtered by entity."""
         conn = self._conn()
         if entity_name:
@@ -286,9 +341,9 @@ class KnowledgeGraph:
                 JOIN entities o ON t.object = o.id
                 WHERE (t.subject = ? OR t.object = ?)
                 ORDER BY t.valid_from ASC NULLS LAST
-                LIMIT 100
+                LIMIT ?
             """,
-                (eid, eid),
+                (eid, eid, limit),
             ).fetchall()
         else:
             rows = conn.execute("""
@@ -297,8 +352,8 @@ class KnowledgeGraph:
                 JOIN entities s ON t.subject = s.id
                 JOIN entities o ON t.object = o.id
                 ORDER BY t.valid_from ASC NULLS LAST
-                LIMIT 100
-            """).fetchall()
+                LIMIT ?
+            """, (limit,)).fetchall()
 
         conn.close()
         return [

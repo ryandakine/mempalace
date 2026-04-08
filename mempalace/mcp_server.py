@@ -372,6 +372,18 @@ def tool_kg_stats():
     return _kg.stats()
 
 
+def tool_kg_contradictions():
+    """Find entities with conflicting current facts for exclusive predicates."""
+    from .knowledge_graph import KnowledgeGraph
+
+    results = _kg.find_contradictions()
+    return {
+        "contradictions": results,
+        "count": len(results),
+        "exclusive_predicates": sorted(KnowledgeGraph.EXCLUSIVE_PREDICATES),
+    }
+
+
 # ==================== AGENT DIARY ====================
 
 
@@ -579,6 +591,11 @@ TOOLS = {
         "description": "Knowledge graph overview: entities, triples, current vs expired facts, relationship types.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_kg_stats,
+    },
+    "mempalace_kg_contradictions": {
+        "description": "Find entities with conflicting current facts (e.g. two open 'works_at' triples). Shows unresolved contradictions for exclusive predicates.",
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_kg_contradictions,
     },
     "mempalace_traverse": {
         "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
