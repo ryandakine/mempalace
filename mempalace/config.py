@@ -66,6 +66,33 @@ DEFAULT_HALL_KEYWORDS = {
 }
 
 
+def get_palace_collection(palace_path: str, create: bool = False):
+    """Single entry point for ChromaDB collection access.
+
+    All callers should use this instead of raw chromadb.PersistentClient.
+    Ensures consistent cosine distance metric across all creation sites.
+
+    Args:
+        palace_path: Path to the palace data directory.
+        create: If True, create the collection if it doesn't exist.
+
+    Returns:
+        ChromaDB collection, or None if collection doesn't exist and create=False.
+    """
+    import chromadb
+
+    os.makedirs(palace_path, exist_ok=True)
+    client = chromadb.PersistentClient(path=palace_path)
+    if create:
+        return client.get_or_create_collection(
+            DEFAULT_COLLECTION_NAME, metadata=CHROMA_COLLECTION_METADATA
+        )
+    try:
+        return client.get_collection(DEFAULT_COLLECTION_NAME)
+    except Exception:
+        return None
+
+
 class MempalaceConfig:
     """Configuration manager for MemPalace.
 

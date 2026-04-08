@@ -34,8 +34,6 @@ from .config import MempalaceConfig  # noqa: E402
 from .version import __version__  # noqa: E402
 from .searcher import search_memories  # noqa: E402
 from .palace_graph import traverse, find_tunnels, graph_stats  # noqa: E402
-import chromadb  # noqa: E402
-
 from .knowledge_graph import KnowledgeGraph  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
@@ -65,23 +63,16 @@ else:
     _kg = KnowledgeGraph()
 
 
-_client_cache = None
 _collection_cache = None
 
 
 def _get_collection(create=False):
     """Return the ChromaDB collection, caching the client between calls."""
-    global _client_cache, _collection_cache
+    global _collection_cache
     try:
-        if _client_cache is None:
-            _client_cache = chromadb.PersistentClient(path=_config.palace_path)
-        if create:
-            from .config import CHROMA_COLLECTION_METADATA
-            _collection_cache = _client_cache.get_or_create_collection(
-                _config.collection_name, metadata=CHROMA_COLLECTION_METADATA
-            )
-        elif _collection_cache is None:
-            _collection_cache = _client_cache.get_collection(_config.collection_name)
+        if create or _collection_cache is None:
+            from .config import get_palace_collection
+            _collection_cache = get_palace_collection(_config.palace_path, create=create)
         return _collection_cache
     except Exception:
         return None
