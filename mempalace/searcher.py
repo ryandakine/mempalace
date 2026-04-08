@@ -7,6 +7,7 @@ Returns verbatim text — the actual words, never summaries.
 """
 
 import logging
+import os
 from pathlib import Path
 
 import chromadb
@@ -148,5 +149,162 @@ def search_memories(
     return {
         "query": query,
         "filters": {"wing": wing, "room": room},
+        "results": hits,
+    }
+
+
+def reciprocal_rank_fusion(
+    semantic_results: list,
+    keyword_results: list,
+    k: int = 60,
+    semantic_weight: float = 0.5,
+    keyword_weight: float = 0.5,
+) -> list:
+    """Fuse two ranked lists using Reciprocal Rank Fusion.
+
+    RRF score = sum over each list: weight / (k + rank).
+    Items appearing in both lists score higher than items in only one.
+    """
+    scores = {}
+
+    for rank_0, result in enumerate(semantic_results):
+        did = result.get("drawer_id") or result.get("id", str(rank_0))
+        scores[did] = scores.get(did, 0.0) + semantic_weight / (k + rank_0 + 1)
+
+    for rank_0, result in enumerate(keyword_results):
+        did = result.get("drawer_id", str(rank_0))
+        scores[did] = scores.get(did, 0.0) + keyword_weight / (k + rank_0 + 1)
+
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
+def hybrid_search(
+    query: str,
+    palace_path: str,
+    wing: str = None,
+    room: str = None,
+    n_results: int = 5,
+    mode: str = "hybrid",
+) -> dict:
+    """Search using semantic, keyword, or hybrid (fused) mode.
+
+    Args:
+        mode: "hybrid" (default), "semantic", or "keyword"
+    """
+    from .fts_index import FTSIndex
+
+    fts = None
+    fts_path = os.path.join(palace_path, "mempalace_fts.sqlite3")
+    if os.path.exists(fts_path):
+        fts = FTSIndex(palace_path)
+
+    # Keyword-only mode
+    if mode == "keyword":
+        if not fts or not fts.exists():
+            return {
+                "query": query,
+                "mode": "keyword",
+                "error": "No FTS index found. Run: mempalace rebuild-index",
+                "results": [],
+            }
+        kw_results = fts.search(query, wing=wing, room=room, limit=n_results)
+        # Fetch full documents from ChromaDB for keyword hits
+        try:
+            from .config import get_palace_collection
+            col = get_palace_collection(palace_path)
+            if col and kw_results:
+                ids = [r["drawer_id"] for r in kw_results]
+                full = col.get(ids=ids, include=["documents", "metadatas"])
+                doc_map = {did: (doc, meta) for did, doc, meta in zip(
+                    full["ids"], full["documents"], full["metadatas"]
+                )}
+                hits = []
+                for r in kw_results:
+                    doc, meta = doc_map.get(r["drawer_id"], ("", {}))
+                    hits.append({
+                        "text": doc,
+                        "wing": meta.get("wing", "unknown"),
+                        "room": meta.get("room", "unknown"),
+                        "source_file": Path(meta.get("source_file", "?")).name,
+                        "match_type": "keyword",
+                        "keyword_snippet": r.get("snippet", ""),
+                    })
+                return {"query": query, "mode": "keyword", "results": hits}
+        except Exception:
+            pass
+        return {"query": query, "mode": "keyword", "results": []}
+
+    # Semantic-only mode (or hybrid fallback when no FTS)
+    semantic_result = search_memories(query, palace_path, wing=wing, room=room, n_results=n_results if mode == "semantic" else n_results * 2)
+
+    if mode == "semantic" or not fts or not fts.exists():
+        if mode == "hybrid" and (not fts or not fts.exists()):
+            logger.info("No FTS index found. Falling back to semantic-only. Run: mempalace rebuild-index")
+        semantic_result["mode"] = mode if fts else "semantic"
+        return semantic_result
+
+    # Hybrid mode: fuse semantic + keyword
+    fetch_limit = n_results * 2
+    kw_results = fts.search(query, wing=wing, room=room, limit=fetch_limit)
+
+    # Build ID-indexed lookup for semantic results
+    semantic_hits = semantic_result.get("results", [])
+    # Generate drawer_id approximations from semantic results for fusion
+    for i, hit in enumerate(semantic_hits):
+        hit["drawer_id"] = f"sem_{i}"  # placeholder, will use position-based fusion
+
+    # Build keyword ID set for match_type detection
+    kw_ids = {r["drawer_id"] for r in kw_results}
+    kw_snippets = {r["drawer_id"]: r.get("snippet", "") for r in kw_results}
+
+    # RRF fusion
+    fused = reciprocal_rank_fusion(semantic_hits, kw_results)
+
+    # Collect top N results with full text
+    # Semantic results already have full text; keyword results need ChromaDB lookup
+    try:
+        from .config import get_palace_collection
+        col = get_palace_collection(palace_path)
+        kw_doc_map = {}
+        if col and kw_results:
+            kw_ids_list = [r["drawer_id"] for r in kw_results]
+            full = col.get(ids=kw_ids_list, include=["documents", "metadatas"])
+            kw_doc_map = {did: (doc, meta) for did, doc, meta in zip(
+                full["ids"], full["documents"], full["metadatas"]
+            )}
+    except Exception:
+        kw_doc_map = {}
+
+    hits = []
+    sem_by_id = {h["drawer_id"]: h for h in semantic_hits}
+
+    for drawer_id, fused_score in fused[:n_results]:
+        if drawer_id in sem_by_id:
+            h = sem_by_id[drawer_id]
+            match_type = "both" if drawer_id in kw_ids else "semantic"
+            hits.append({
+                "text": h["text"],
+                "wing": h["wing"],
+                "room": h["room"],
+                "source_file": h.get("source_file", "?"),
+                "similarity": h.get("similarity", 0),
+                "relevance": round(fused_score, 4),
+                "match_type": match_type,
+            })
+        elif drawer_id in kw_doc_map:
+            doc, meta = kw_doc_map[drawer_id]
+            hits.append({
+                "text": doc,
+                "wing": meta.get("wing", "unknown"),
+                "room": meta.get("room", "unknown"),
+                "source_file": Path(meta.get("source_file", "?")).name,
+                "relevance": round(fused_score, 4),
+                "match_type": "keyword",
+                "keyword_snippet": kw_snippets.get(drawer_id, ""),
+            })
+
+    return {
+        "query": query,
+        "mode": "hybrid",
         "results": hits,
     }

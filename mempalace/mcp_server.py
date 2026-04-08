@@ -32,7 +32,6 @@ sys.stdout = sys.stderr
 
 from .config import MempalaceConfig  # noqa: E402
 from .version import __version__  # noqa: E402
-from .searcher import search_memories  # noqa: E402
 from .palace_graph import traverse, find_tunnels, graph_stats  # noqa: E402
 from .knowledge_graph import KnowledgeGraph  # noqa: E402
 
@@ -198,13 +197,16 @@ def tool_get_taxonomy():
     return {"taxonomy": taxonomy}
 
 
-def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
-    return search_memories(
+def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None, mode: str = "hybrid"):
+    from .searcher import hybrid_search
+
+    return hybrid_search(
         query,
         palace_path=_config.palace_path,
         wing=wing,
         room=room,
         n_results=limit,
+        mode=mode,
     )
 
 
@@ -613,7 +615,7 @@ TOOLS = {
         "handler": tool_graph_stats,
     },
     "mempalace_search": {
-        "description": "Semantic search. Returns verbatim drawer content with similarity scores.",
+        "description": "Search the palace. Hybrid mode combines semantic similarity with keyword matching for best results.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -621,6 +623,11 @@ TOOLS = {
                 "limit": {"type": "integer", "description": "Max results (default 5)"},
                 "wing": {"type": "string", "description": "Filter by wing (optional)"},
                 "room": {"type": "string", "description": "Filter by room (optional)"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["hybrid", "semantic", "keyword"],
+                    "description": "Search mode: hybrid (default, best quality), semantic (embedding similarity only), keyword (exact term matching only)",
+                },
             },
             "required": ["query"],
         },

@@ -318,6 +318,53 @@ def cmd_migrate(args):
     print(f"\n{'=' * 55}\n")
 
 
+def cmd_rebuild_index(args):
+    """Build or rebuild the FTS5 keyword search index from ChromaDB data."""
+    from .config import get_palace_collection
+    from .fts_index import FTSIndex
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    col = get_palace_collection(palace_path)
+    if not col:
+        print(f"\n  No palace found at {palace_path}")
+        return
+
+    total = col.count()
+    print(f"\n  Palace: {palace_path}")
+    print(f"  Drawers: {total}")
+    print(f"  Building FTS5 keyword index...")
+
+    fts = FTSIndex(palace_path)
+    indexed = fts.rebuild(col)
+    print(f"  Indexed {indexed} drawers into FTS5.")
+    print(f"  Hybrid search is now available.\n")
+
+
+def cmd_check_index(args):
+    """Check consistency between ChromaDB and FTS5 indexes."""
+    from .config import get_palace_collection
+    from .fts_index import FTSIndex
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    col = get_palace_collection(palace_path)
+    if not col:
+        print(f"\n  No palace found at {palace_path}")
+        return
+
+    fts = FTSIndex(palace_path)
+    result = fts.check_consistency(col)
+
+    print(f"\n  Palace: {palace_path}")
+    print(f"  ChromaDB drawers: {result['chromadb_count']}")
+    print(f"  FTS5 rows:        {result['fts_count']}")
+
+    if result["consistent"]:
+        print(f"  Status: CONSISTENT\n")
+    else:
+        print(f"  Status: DRIFT DETECTED ({result['drift']} difference)")
+        print(f"  Run: mempalace rebuild-index to fix\n")
+
+
 def cmd_hook(args):
     """Run hook logic: reads JSON from stdin, outputs JSON to stdout."""
     from .hooks_cli import run_hook
@@ -598,6 +645,18 @@ def main():
         help="Migrate palace to cosine distance metric (fixes similarity scoring)",
     )
 
+    # rebuild-index
+    sub.add_parser(
+        "rebuild-index",
+        help="Build FTS5 keyword search index from existing palace data",
+    )
+
+    # check-index
+    sub.add_parser(
+        "check-index",
+        help="Check consistency between ChromaDB and FTS5 indexes",
+    )
+
     # status
     sub.add_parser("status", help="Show what's been filed")
 
@@ -633,6 +692,8 @@ def main():
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
         "migrate": cmd_migrate,
+        "rebuild-index": cmd_rebuild_index,
+        "check-index": cmd_check_index,
         "status": cmd_status,
     }
     dispatch[args.command](args)
