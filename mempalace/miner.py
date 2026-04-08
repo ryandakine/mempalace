@@ -394,12 +394,14 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 def get_collection(palace_path: str):
+    from .config import CHROMA_COLLECTION_METADATA
+
     os.makedirs(palace_path, exist_ok=True)
     client = chromadb.PersistentClient(path=palace_path)
     try:
         return client.get_collection("mempalace_drawers")
     except Exception:
-        return client.create_collection("mempalace_drawers")
+        return client.create_collection("mempalace_drawers", metadata=CHROMA_COLLECTION_METADATA)
 
 
 def file_already_mined(collection, source_file: str) -> bool:

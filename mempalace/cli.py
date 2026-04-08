@@ -208,9 +208,11 @@ def cmd_repair(args):
     print(f"  Backing up to {backup_path}...")
     shutil.copytree(palace_path, backup_path)
 
+    from .config import CHROMA_COLLECTION_METADATA
+
     print("  Rebuilding collection...")
     client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
+    new_col = client.create_collection("mempalace_drawers", metadata=CHROMA_COLLECTION_METADATA)
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):

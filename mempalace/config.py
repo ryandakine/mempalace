@@ -11,6 +11,10 @@ from pathlib import Path
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 
+# ChromaDB collection metadata — use cosine distance for correct similarity scoring.
+# The default (L2/Euclidean) produces unbounded distances that break `1 - dist` scoring.
+CHROMA_COLLECTION_METADATA = {"hnsw:space": "cosine"}
+
 DEFAULT_TOPIC_WINGS = [
     "emotions",
     "consciousness",

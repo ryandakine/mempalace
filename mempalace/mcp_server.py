@@ -71,7 +71,10 @@ def _get_collection(create=False):
         if _client_cache is None:
             _client_cache = chromadb.PersistentClient(path=_config.palace_path)
         if create:
-            _collection_cache = _client_cache.get_or_create_collection(_config.collection_name)
+            from .config import CHROMA_COLLECTION_METADATA
+            _collection_cache = _client_cache.get_or_create_collection(
+                _config.collection_name, metadata=CHROMA_COLLECTION_METADATA
+            )
         elif _collection_cache is None:
             _collection_cache = _client_cache.get_collection(_config.collection_name)
         return _collection_cache
@@ -788,6 +791,10 @@ def handle_request(request):
 
 
 def main():
+    # Redirect stdout to stderr so stray prints from libraries (ChromaDB, etc.)
+    # don't contaminate the JSON-RPC transport. Use _rpc_out for protocol writes.
+    _rpc_out = sys.stdout
+    sys.stdout = sys.stderr
     logger.info("MemPalace MCP Server starting...")
     while True:
         try:
@@ -800,8 +807,8 @@ def main():
             request = json.loads(line)
             response = handle_request(request)
             if response is not None:
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
+                _rpc_out.write(json.dumps(response) + "\n")
+                _rpc_out.flush()
         except KeyboardInterrupt:
             break
         except Exception as e:
