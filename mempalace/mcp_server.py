@@ -88,6 +88,8 @@ def _no_palace():
 
 
 def tool_status():
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -95,8 +97,7 @@ def tool_status():
     wings = {}
     rooms = {}
     try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col):
             w = m.get("wing", "unknown")
             r = m.get("room", "unknown")
             wings[w] = wings.get(w, 0) + 1
@@ -147,13 +148,14 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
 def tool_list_wings():
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
     wings = {}
     try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col):
             w = m.get("wing", "unknown")
             wings[w] = wings.get(w, 0) + 1
     except Exception:
@@ -162,16 +164,15 @@ def tool_list_wings():
 
 
 def tool_list_rooms(wing: str = None):
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
     rooms = {}
+    where = {"wing": wing} if wing else None
     try:
-        kwargs = {"include": ["metadatas"], "limit": 10000}
-        if wing:
-            kwargs["where"] = {"wing": wing}
-        all_meta = col.get(**kwargs)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col, where=where):
             r = m.get("room", "unknown")
             rooms[r] = rooms.get(r, 0) + 1
     except Exception:
@@ -180,13 +181,14 @@ def tool_list_rooms(wing: str = None):
 
 
 def tool_get_taxonomy():
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
     taxonomy = {}
     try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col):
             w = m.get("wing", "unknown")
             r = m.get("room", "unknown")
             if w not in taxonomy:
@@ -444,18 +446,33 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         return _no_palace()
 
     try:
-        results = col.get(
-            where={"$and": [{"wing": wing}, {"room": "diary"}]},
-            include=["documents", "metadatas"],
-            limit=10000,
-        )
+        # Paginate to avoid silent truncation at 10k
+        all_docs = []
+        all_metas = []
+        offset = 0
+        batch_size = 5000
+        while True:
+            batch = col.get(
+                where={"$and": [{"wing": wing}, {"room": "diary"}]},
+                include=["documents", "metadatas"],
+                limit=batch_size,
+                offset=offset,
+            )
+            ids = batch.get("ids", []) or []
+            if not ids:
+                break
+            all_docs.extend(batch["documents"])
+            all_metas.extend(batch["metadatas"])
+            if len(ids) < batch_size:
+                break
+            offset += batch_size
 
-        if not results["ids"]:
+        if not all_docs:
             return {"agent": agent_name, "entries": [], "message": "No diary entries yet."}
 
         # Combine and sort by timestamp
         entries = []
-        for doc, meta in zip(results["documents"], results["metadatas"]):
+        for doc, meta in zip(all_docs, all_metas):
             entries.append(
                 {
                     "date": meta.get("date", ""),
@@ -471,7 +488,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         return {
             "agent": agent_name,
             "entries": entries,
-            "total": len(results["ids"]),
+            "total": len(all_docs),
             "showing": len(entries),
         }
     except Exception as e:

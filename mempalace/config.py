@@ -66,6 +66,27 @@ DEFAULT_HALL_KEYWORDS = {
 }
 
 
+def iter_all_metadata(collection, where=None, batch_size: int = 5000):
+    """Yield all metadatas from a ChromaDB collection in batches.
+
+    Avoids the silent truncation of `limit=10000` by paginating through
+    the entire collection. Use this instead of `col.get(limit=10000)`.
+    """
+    offset = 0
+    while True:
+        kwargs = {"include": ["metadatas"], "limit": batch_size, "offset": offset}
+        if where:
+            kwargs["where"] = where
+        batch = collection.get(**kwargs)
+        metas = batch.get("metadatas", []) or []
+        if not metas:
+            break
+        yield from metas
+        if len(metas) < batch_size:
+            break
+        offset += batch_size
+
+
 def get_palace_collection(palace_path: str, create: bool = False):
     """Single entry point for ChromaDB collection access.
 
