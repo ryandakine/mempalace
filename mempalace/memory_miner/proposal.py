@@ -78,8 +78,12 @@ class MemoryProposal:
     confidence: float = 0.0
     source_chunk: Any = None
     likely_duplicate_of: Optional[str] = None
-    # dedup verdict (filled by dedup.py): {action, target, score}
-    dedup: dict = field(default_factory=lambda: {"action": "create", "target": None, "score": 0.0})
+    # dedup verdict (filled by dedup.py): {action, target, score, enrich}
+    # ``enrich`` is True only on a non-identity update → accept.py appends the
+    # delta to the existing target instead of creating a duplicate file.
+    dedup: dict = field(
+        default_factory=lambda: {"action": "create", "target": None, "score": 0.0, "enrich": False}
+    )
 
     def __post_init__(self):
         if not self.id:
