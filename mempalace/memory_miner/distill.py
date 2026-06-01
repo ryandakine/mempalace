@@ -34,15 +34,46 @@ long-term memory store loaded into every FUTURE session. Be RECALL-oriented: ext
 would still be true or useful next week. Durability/dedup filtering happens downstream — your job is
 high recall, not gatekeeping.
 
-The store has exactly 4 types:
-- user: who the user is — role, expertise, durable preferences, identity.
-- feedback: how the AI should work for the user — corrections, confirmed approaches, workflow rules. Include the WHY.
-- project: ongoing work, goals, status, or constraints NOT derivable from code/git.
-- reference: pointers to external resources/tools/configs/gotchas (URLs, paths, commands, where-creds-live).
+The store has exactly 4 types. Choose the type by asking WHAT KIND of fact it is, not what words it uses:
 
-GOOD examples (SHAPE ONLY — these are synthetic; extract the real facts from THIS session, never copy these):
-- {"type":"feedback","body":"Run the full test suite before every commit; the user treats a red suite as a hard blocker."}
-- {"type":"reference","body":"Production logs live in Grafana Loki — query by the service label."}
+- user — WHO THE USER IS. Durable identity and personal facts: name, role, employer, expertise level,
+  location, hardware they own, products they build. A user fact describes the person, not an instruction.
+  Test: "This is a fact about the user as a person." If the fact tells you how to BEHAVE, it is NOT user.
+
+- feedback — HOW TO WORK WITH THE USER. Any directive, correction, confirmed approach, workflow rule, or
+  preference about how the AI should operate. Anything phrased as "<user> routes/prefers/always/never/uses/
+  wants/expects X", "do/don't X", "when Y, do Z", or a lesson learned from a past mistake. Include the WHY.
+  Test: "Next session, this changes what the AI should DO." If yes, it is feedback — even if it mentions the
+  user by name and sounds like a personal trait.
+
+- project — STATUS/STATE OF ONGOING WORK. Goals, current status, blockers, decisions, or constraints for a
+  specific project that are NOT derivable from code/git. Things that will change as the work progresses.
+  Test: "This describes the state of some in-flight work and could be stale next month."
+
+- reference — WHERE THINGS LIVE / EXTERNAL FACTS. Pointers to external tools, services, URLs, file paths,
+  commands, configs, credentials-locations, and gotchas about third-party systems.
+  Test: "This is a stable pointer to a tool/path/URL/config, or a gotcha about an external system."
+
+DISAMBIGUATION (apply in this order — these resolve the common confusions):
+1. how-to-work-with-the-user → feedback, NOT user. "<user> routes/prefers/always/never/uses X", any
+   directive or workflow guidance, or a lesson from a past mistake is feedback even though it names the user.
+   Example: "Ryan routes heavy work through Grok when budget is low" is FEEDBACK (a routing rule), not user.
+2. who-the-user-IS / durable identity → user. Name, role, employer, expertise, hardware, the products they
+   own. No instruction to follow → user.
+3. status/state of in-flight work → project. Anything that could be stale next month belongs to project.
+4. external tool / path / URL / config / command / gotcha / where-things-live → reference.
+When a fact could be user OR feedback, prefer feedback if it changes future behavior; reserve user for pure
+identity with no actionable instruction.
+
+GOOD examples (SHAPE ONLY — synthetic; extract the REAL facts from THIS session, never copy these):
+- user:      {"type":"user","body":"The user is a staff backend engineer who owns three production services."}
+- user:      {"type":"user","body":"The user develops on a 48GB Linux workstation with a single free M.2 slot."}
+- feedback:  {"type":"feedback","body":"The user routes heavy/expensive work to the cheaper model when budget is tight — default to it before reaching for the premium model."}
+- feedback:  {"type":"feedback","body":"Run the full test suite before every commit; the user treats a red suite as a hard blocker."}
+- project:   {"type":"project","body":"The billing-rewrite project is blocked on a pending schema migration; ship is paused until it lands."}
+- project:   {"type":"project","body":"The mobile app is in closed beta with a 14-day review requirement still outstanding."}
+- reference: {"type":"reference","body":"Production logs live in Grafana Loki — query by the service label."}
+- reference: {"type":"reference","body":"Deploy secrets are injected at runtime from the secrets vault, never from an on-disk .env."}
 
 RULES:
 - One fact per memory. Rewrite into a clean, self-contained statement (a fact about the user / their work /
@@ -120,6 +151,57 @@ def parse_json_array(raw: str):
         return None
 
 
+# --------------------------------------------------------- post-classification
+# Deterministic safety net for the ONE confusion the live dry-run exposed:
+# how-to-work-with-the-user guidance ("Ryan routes/prefers/always/never X") gets
+# mistyped as `user` instead of `feedback`. This is a narrow, conservative nudge —
+# it ONLY ever rewrites a `user` proposal to `feedback`, and ONLY when the body is
+# clearly an actionable directive about how the AI should operate. It never touches
+# project/reference proposals and never invents a type the model didn't choose, so
+# it cannot regress a correctly-typed identity fact in the common case.
+
+# Verbs/phrasings that signal "this is a behavioral rule, not an identity fact".
+_FEEDBACK_DIRECTIVE = re.compile(
+    r"\b("
+    r"route[sd]?|prefer[sr]?|prefers|always|never|use[sd]?|avoid[s]?|"
+    r"default[s]?\s+to|fall[s]?\s+back|should|must|don'?t|do\s+not|wants?|"
+    r"expect[s]?|likes?\s+(?:me|you|the\s+ai|claude)\s+to|insist[s]?\s+on|"
+    r"instead\s+of|rather\s+than|skip[s]?|stop[s]?\s+(?:asking|doing)"
+    r")\b",
+    re.IGNORECASE,
+)
+# Pure-identity signals that must STAY `user` even if a directive verb appears.
+# (e.g. "The user prefers Rust" is a durable taste = user; but "prefer Rust over Go
+#  for new services" is a directive = feedback. We bias toward keeping user only
+#  when there is NO clear how-to-work-with-me action verb at all — see below.)
+_IDENTITY_ANCHOR = re.compile(
+    r"\b(is\s+(?:a|an|the)\s|works?\s+(?:at|for)\b|name\s+is\b|based\s+in\b|"
+    r"owns?\b|builds?\b|email\b|role\s+is\b|years?\s+of\s+experience\b)",
+    re.IGNORECASE,
+)
+
+
+def nudge_type(p_type: str, body: str) -> str:
+    """Deterministically correct the one well-known misclassification (plan / bug).
+
+    Returns the (possibly corrected) store type. Conservative by design:
+      * only ``user`` is ever rewritten, and only ever to ``feedback``;
+      * the rewrite fires only when the body reads as an actionable how-to-work
+        directive AND lacks a strong pure-identity anchor;
+      * every other type is returned untouched.
+
+    Never raises. Unknown/empty types pass through unchanged for the validator.
+    """
+    if p_type != "user":
+        return p_type
+    text = (body or "").strip()
+    if not text:
+        return p_type
+    if _FEEDBACK_DIRECTIVE.search(text) and not _IDENTITY_ANCHOR.search(text):
+        return "feedback"
+    return p_type
+
+
 def distill(
     transcript_path: Path,
     *,
@@ -175,10 +257,15 @@ def distill(
         if not ok:
             log.info("rejected proposal in %s: %s", session_id, reason)
             continue
+        # Deterministic post-classification nudge (narrow user→feedback correction).
+        corrected = nudge_type(p["type"], p.get("body") or "")
+        if corrected != p["type"]:
+            log.info("nudged proposal %r in %s: %s -> %s",
+                     p.get("name"), session_id, p["type"], corrected)
         out.append(
             MemoryProposal(
                 name=p["name"].strip(),
-                type=p["type"],
+                type=corrected,
                 description=p["description"].strip(),
                 body=p["body"].strip(),
                 source_session=session_id,
