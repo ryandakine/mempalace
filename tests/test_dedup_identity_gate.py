@@ -59,3 +59,17 @@ def test_reference_high_overlap_still_updates(tmp_path):
               "Updated deployment topology details.")
     v = classify(p, idx)
     assert v["action"] == "update"
+    assert v["enrich"] is True  # non-identity update enriches
+
+
+def test_identity_near_dup_never_carries_enrich(tmp_path):
+    # even at very high overlap, an identity type must NOT be flagged to enrich;
+    # it routes to review with enrich False (human-gated forever).
+    idx = StoreIndex.from_dir(_seed(tmp_path))
+    p = _prop("Skip permission prompts and just execute", "feedback",
+              "User prefers bypassing tool permissions and executing without interruption.",
+              "Do not ask for permission before executing; just run the command.")
+    v = classify(p, idx)
+    assert v["action"] == "review"
+    assert v["enrich"] is False
+    assert v["target"] == "feedback_skip_permissions.md"  # match found, but gated

@@ -52,15 +52,16 @@ def test_no_overlap_becomes_create_with_unique_slug(tmp_path):
 
 
 def test_mid_overlap_flags_review(tmp_path):
+    from mempalace.memory_miner.dedup import HIGH, MID
     idx = StoreIndex.from_dir(_seed_store(tmp_path))
-    # shares most tokens with the existing grok-proxy entry but is not an exact
-    # name/slug match → lands in the MID band (>=0.42, <0.62) → review.
-    p = _prop("Grok proxy endpoint", "reference",
-              "Local FastAPI proxy forwarding to xAI Grok.",
-              "The grok proxy forwards requests.")
+    # shares the "xAI Grok" topic with the existing grok-proxy entry but is a
+    # distinct fact (not the proxy) → lands in the MID band [MID, HIGH) → review.
+    p = _prop("xAI Grok model", "reference",
+              "Grok is xAI's model.",
+              "xAI makes the Grok model.")
     v = classify(p, idx)
     assert v["action"] == "review"
-    assert 0.42 <= v["score"] < 0.62
+    assert MID <= v["score"] < HIGH
 
 
 def test_works_without_fts_no_embed_scorer(tmp_path):
@@ -97,3 +98,81 @@ def test_empty_store_dir(tmp_path):
     p = _prop("new fact", "reference", "d", "b")
     v = classify(p, idx)
     assert v["action"] == "create"
+
+
+# --------------------------------------------------------------------------
+# Recall regression: the proven-missed ask-claude-bridge-live vs ask-claude-bridge
+# case. Under the old name/description-only lexical scorer it scored 0.31 and was
+# wrongly classified `create`. With body-aware semantic similarity it must MATCH.
+# --------------------------------------------------------------------------
+def _seed_bridge(tmp_path: Path):
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    # mirrors the real reference_ask_claude_bridge.md (nested metadata frontmatter)
+    (mem / "reference_ask_claude_bridge.md").write_text(
+        "---\n"
+        "name: ask-claude-bridge\n"
+        "description: ask-claude is the reverse of ask-grok — lets Grok/any agent "
+        "get a Claude review off-subscription\n"
+        "metadata:\n"
+        "  node_type: memory\n"
+        "  type: reference\n"
+        "---\n\n"
+        "`/home/ryan/bin/ask-claude` is the mirror of ask-grok: it lets Grok or any "
+        "tool-enabled agent get a Claude second opinion. Hits the Anthropic Messages "
+        "API directly, default model claude-opus-4-8. Billing is pay-as-you-go "
+        "Anthropic API, separate from the Claude Code Max subscription.\n"
+    )
+    return mem
+
+
+def test_ask_claude_bridge_live_matches_existing(tmp_path):
+    idx = StoreIndex.from_dir(_seed_bridge(tmp_path))
+    p = _prop(
+        "ask-claude-bridge-live", "reference",
+        "ask-claude bridge lets Grok get a Claude review off the subscription, "
+        "pay-as-you-go Anthropic API",
+        "ask-claude is the mirror of ask-grok: it lets Grok or any tool-enabled "
+        "agent get a Claude second opinion via the Anthropic Messages API, billed "
+        "pay-as-you-go separate from the Claude Code subscription.",
+    )
+    best, score = idx.best_match(p)
+    assert best is not None
+    assert best["file"] == "reference_ask_claude_bridge.md"
+    v = classify(p, idx)
+    assert v["action"] == "update", f"expected update, got {v} (score={score})"
+    assert v["target"] == "reference_ask_claude_bridge.md"
+    assert v["enrich"] is True  # non-identity update → merge/enrich
+
+
+def test_body_indexing_catches_dup_that_name_desc_miss(tmp_path):
+    # name + description deliberately share almost NO tokens with the stored
+    # entry; the duplicate signal lives entirely in the body.
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "reference_tunnel.md").write_text(
+        "---\nname: Cloudflare tunnel inventory\n"
+        "description: which named tunnel serves which hostname.\n"
+        "type: reference\n---\n"
+        "The main cloudflared tunnel is named congressional-intel and uses "
+        "REMOTE config mode, load-balancing every hostname across connectors.\n"
+    )
+    idx = StoreIndex.from_dir(mem)
+    p = _prop(
+        "Shared connector load balancing surprise", "reference",
+        "an operational gotcha about hostnames",
+        "The main cloudflared tunnel is named congressional-intel and uses REMOTE "
+        "config mode, load-balancing every hostname across connectors.",
+    )
+    # name/description alone barely overlap; body makes this a clear duplicate.
+    best, score = idx.best_match(p)
+    assert best["file"] == "reference_tunnel.md"
+    assert classify(p, idx)["action"] == "update"
+
+
+def test_nested_metadata_type_is_parsed(tmp_path):
+    # real store files nest `type:` under a `metadata:` block, indented.
+    idx = StoreIndex.from_dir(_seed_bridge(tmp_path))
+    assert len(idx.entries) == 1
+    assert idx.entries[0]["type"] == "reference"
+    assert idx.entries[0]["name"] == "ask-claude-bridge"
