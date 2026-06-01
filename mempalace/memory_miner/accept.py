@@ -57,6 +57,74 @@ def render_memory_md(proposal: Dict) -> str:
     return "\n".join(fm) + "\n\n" + body + "\n"
 
 
+# ----------------------------------------------------------- merge / enrich
+_FM_RE = re.compile(r"^(---\s*\n)(.*?\n)(---\s*\n)(.*)$", re.S)
+
+
+def _split_frontmatter(text: str):
+    """Return (open_fence, fm_lines, close_fence, body) or (None, None, None, text)."""
+    m = _FM_RE.match(text)
+    if not m:
+        return None, None, None, text
+    return m.group(1), m.group(2), m.group(3), m.group(4)
+
+
+def _replace_fm_field(fm_lines: str, key: str, value: str) -> str:
+    """Replace ``key:`` in a frontmatter block (flat or one-level indented).
+
+    Returns the updated block. If the key is absent, the block is unchanged.
+    """
+    pat = re.compile(rf"^(\s*){re.escape(key)}:.*$", re.M)
+    new = f"{key}: {value}".strip()
+
+    def _sub(mo):
+        return f"{mo.group(1)}{new}"
+
+    return pat.sub(_sub, fm_lines, count=1)
+
+
+def enrich_memory_file(path: Path, proposal: Dict) -> bool:
+    """Append the proposal's new info to an existing memory file (merge path).
+
+    NON-identity types only — the caller (the merge/update verdict) guarantees
+    this. Atomic. Idempotent: if the exact delta body is already present we make
+    no change and return False. The description is refreshed to the proposal's
+    (newer) description so the index pointer stays current.
+
+    Returns True if the file changed.
+    """
+    path = Path(path)
+    if not path.exists():
+        # nothing to enrich — caller should fall back to create
+        return False
+    text = path.read_text(encoding="utf-8", errors="replace")
+    open_f, fm_lines, close_f, body = _split_frontmatter(text)
+
+    delta = (proposal.get("body") or "").strip()
+    if not delta:
+        return False
+
+    # idempotency: don't append a delta that's already verbatim in the body.
+    if delta and delta in body:
+        return False
+
+    new_desc = (proposal.get("description") or "").strip()
+    session = (proposal.get("source_session") or "").strip()
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    src = f" (source: {session})" if session else ""
+    appended = f"\n\n_Enriched {stamp}{src}:_\n{delta}\n"
+
+    if open_f is not None:
+        if new_desc:
+            fm_lines = _replace_fm_field(fm_lines, "description", new_desc)
+        new_text = open_f + fm_lines + close_f + body.rstrip() + appended
+    else:
+        new_text = body.rstrip() + appended
+
+    _atomic_write(path, new_text)
+    return True
+
+
 def memory_filename(proposal: Dict, existing_slugs: set) -> str:
     """`<type>_<slug>.md`, made unique against existing on-disk slugs."""
     base = slugify(proposal.get("name", "memory"))
@@ -237,6 +305,26 @@ def accept(
 
     results: List[Dict] = []
     for prop in chosen:
+        action, target = _merge_target(prop, memory_dir)
+        if action == "merge" and target is not None:
+            # MERGE / ENRICH: append the new info onto the existing file
+            # (non-identity types only — enforced by dedup.classify).
+            filename = target.name
+            changed = enrich_memory_file(target, prop)
+            update_memory_index(
+                index_path, filename, prop.get("name", ""),
+                prop.get("description", ""), prop.get("type", "reference"),
+            )
+            append_ledger(ledger_path, prop, filename)
+            if dual_write_mempalace and changed:
+                _dual_write(prop, filename)
+            results.append({
+                "id": prop.get("id"), "file": filename,
+                "type": prop.get("type"), "action": "merge",
+            })
+            continue
+
+        # CREATE: write a fresh memory file.
         filename = memory_filename(prop, existing_slugs)
         mem_path = memory_dir / filename
         _atomic_write(mem_path, render_memory_md(prop))
@@ -247,8 +335,33 @@ def accept(
         append_ledger(ledger_path, prop, filename)
         if dual_write_mempalace:
             _dual_write(prop, filename)
-        results.append({"id": prop.get("id"), "file": filename, "type": prop.get("type")})
+        results.append({
+            "id": prop.get("id"), "file": filename,
+            "type": prop.get("type"), "action": "create",
+        })
     return results
+
+
+def _merge_target(prop: Dict, memory_dir: Path):
+    """Decide whether this proposal should ENRICH an existing file.
+
+    Returns ("merge", Path) when the dedup verdict says update+enrich against a
+    real, non-identity target that exists on disk; otherwise ("create", None).
+    Identity types (user/feedback) never merge — they are routed to ``review``
+    upstream and, if force-accepted, create a fresh file for a human to reconcile.
+    """
+    ded = prop.get("dedup") or {}
+    if ded.get("action") != "update" or not ded.get("enrich"):
+        return "create", None
+    if prop.get("type") in ("user", "feedback"):
+        return "create", None
+    target = ded.get("target")
+    if not target:
+        return "create", None
+    target_path = Path(memory_dir) / target
+    if not target_path.exists():
+        return "create", None
+    return "merge", target_path
 
 
 def _dual_write(prop: Dict, filename: str) -> None:
