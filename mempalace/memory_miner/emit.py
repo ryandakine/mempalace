@@ -64,12 +64,14 @@ def emit(
     out_dir: Path,
     *,
     accepted_ledger: Path = None,
+    decisions_ledger: Path = None,
 ) -> List[MemoryProposal]:
     """Append NEW proposals to proposals.jsonl and rewrite proposals.md.
 
     Returns the proposals that were newly written (skipping ids already present
-    in the queue or the accepted ledger). proposals.md is regenerated from the
-    full jsonl so it always reflects the current queue.
+    in the queue, the accepted ledger, or the decisions ledger — so a proposal
+    you rejected/reviewed/accepted never resurfaces on a later run). proposals.md
+    is regenerated from the full jsonl so it always reflects the current queue.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +81,9 @@ def emit(
     seen = load_existing_ids(jsonl_path)
     if accepted_ledger is not None:
         seen |= load_accepted_ids(accepted_ledger)
+    if decisions_ledger is not None:
+        from .tuning import decided_ids
+        seen |= decided_ids(decisions_ledger)
 
     newly: List[MemoryProposal] = []
     with open(jsonl_path, "a", encoding="utf-8") as fh:

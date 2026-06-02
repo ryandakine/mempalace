@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import accept as accept_mod
 from . import emit as emit_mod
+from . import tuning
 from .dedup import StoreIndex, classify
 from .distill import distill
 from .providers import get_provider
@@ -108,7 +109,11 @@ def cmd_run(args) -> int:
             for p in proposals:
                 classify(p, index)
 
-            written = emit_mod.emit(proposals, out_dir, accepted_ledger=ledger_path)
+            written = emit_mod.emit(
+                proposals, out_dir,
+                accepted_ledger=ledger_path,
+                decisions_ledger=tuning.default_decisions_path(),
+            )
             total_new += len(written)
             # per-file watermark commit (plan §4.3): commit AFTER emit succeeds.
             wm.commit(t, count_records(t))
@@ -154,6 +159,20 @@ def cmd_accept(args) -> int:
     return 0
 
 
+# ------------------------------------------------------------------ reject
+def cmd_reject(args) -> int:
+    if not args.ids:
+        log.error("reject needs <id>...")
+        return 2
+    n = 0
+    for pid in args.ids:
+        if tuning.reject(pid):
+            n += 1
+            print(f"  rejected {pid}")
+    print(f"\n{n} proposal(s) recorded as rejected — they won't resurface on future runs.")
+    return 0
+
+
 # ------------------------------------------------------------------ status
 def cmd_status(args) -> int:
     out_dir = Path(args.out_dir)
@@ -164,10 +183,12 @@ def cmd_status(args) -> int:
     wm = Watermark()
     queue_ids = emit_mod.load_existing_ids(queue_path)
     accepted_ids = emit_mod.load_accepted_ids(ledger_path)
+    decided_ids = tuning.decided_ids()
     print(f"Watermarked transcripts: {len(wm.data)}")
     print(f"Queued proposals:        {len(queue_ids)}")
     print(f"Accepted (ledger):       {len(accepted_ids)}")
-    print(f"Pending review:          {len(queue_ids - accepted_ids)}")
+    print(f"Decided (accept/reject/review): {len(decided_ids)}")
+    print(f"Pending review:          {len(queue_ids - accepted_ids - decided_ids)}")
     print(f"Queue file:              {queue_path}")
     return 0
 
@@ -201,6 +222,10 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--dual-write-mempalace", action="store_true",
                    help="also write to MemPalace (OFF by default)")
     a.set_defaults(func=cmd_accept)
+
+    rj = sub.add_parser("reject", help="record proposal id(s) as rejected (won't resurface)")
+    rj.add_argument("ids", nargs="+", help="proposal id(s) to reject")
+    rj.set_defaults(func=cmd_reject)
 
     s = sub.add_parser("status", help="show watermark + queue summary")
     s.set_defaults(func=cmd_status)
