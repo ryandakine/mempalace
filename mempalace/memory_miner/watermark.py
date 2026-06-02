@@ -162,6 +162,19 @@ def count_records(transcript: Path) -> int:
     return n
 
 
+_SUBTRANSCRIPT_DIRS = {"subagents", "workflows"}
+
+
+def _is_subtranscript(p: Path) -> bool:
+    """True for subagent transcripts / workflow journals — implementation chatter,
+    not durable user sessions. Real sessions are ``<uuid>.jsonl`` directly under a
+    project dir; subagent runs are ``…/subagents/agent-*.jsonl`` and workflow runs
+    are ``…/subagents/workflows/wf_*/journal.jsonl``."""
+    if p.name.startswith("agent-") or p.name == "journal.jsonl":
+        return True
+    return any(part in _SUBTRANSCRIPT_DIRS for part in p.parts)
+
+
 def discover_transcripts(
     roots: List[Path],
     pattern: str = "*.jsonl",
@@ -196,9 +209,10 @@ def discover_transcripts(
     # de-dup while preserving order
     seen, out = set(), []
     for p in found:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
+        if p in seen or _is_subtranscript(p):
+            continue
+        seen.add(p)
+        out.append(p)
 
     if since_ts is None and not newest_first:
         return out
