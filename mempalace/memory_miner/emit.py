@@ -93,6 +93,14 @@ def emit(
     return newly
 
 
+def _truncate_excerpt(text: str, width: int = 200) -> str:
+    """Collapse whitespace and clip the provenance excerpt for the review queue."""
+    text = " ".join((text or "").split())
+    if len(text) > width:
+        text = text[:width].rstrip() + "…"
+    return text
+
+
 def _write_md(jsonl_path: Path, md_path: Path) -> None:
     rows = []
     if Path(jsonl_path).exists():
@@ -124,8 +132,11 @@ def _write_md(jsonl_path: Path, md_path: Path) -> None:
             ded = r.get("dedup") or {}
             target = ded.get("target")
             tgt = f" → `{target}`" if target else ""
+            # Staleness marker: ⏳ flags facts the heuristic judged time-sensitive
+            # (in-flight project state) — re-verify before accepting.
+            stale = " ⏳" if r.get("time_sensitive") else ""
             lines.append(
-                f"### `{r.get('id', '?')}`  [{r.get('type', '?')}] {r.get('name', '?')}"
+                f"### `{r.get('id', '?')}`  [{r.get('type', '?')}] {r.get('name', '?')}{stale}"
                 f"  (conf={r.get('confidence', '?')}, dedup={ded.get('score', '?')}{tgt})"
             )
             lines.append("")
@@ -134,6 +145,11 @@ def _write_md(jsonl_path: Path, md_path: Path) -> None:
                 lines.append("")
             lines.append("> " + (r.get("body", "").strip().replace("\n", "\n> ")))
             lines.append("")
+            excerpt = (r.get("source_excerpt") or "").strip()
+            if excerpt:
+                excerpt = _truncate_excerpt(excerpt)
+                lines.append("> excerpt: " + excerpt.replace("\n", " "))
+                lines.append("")
             lines.append(f"<sub>source: {r.get('source_session', '?')}</sub>")
             lines.append("")
 

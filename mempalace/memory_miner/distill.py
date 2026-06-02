@@ -202,6 +202,64 @@ def nudge_type(p_type: str, body: str) -> str:
     return p_type
 
 
+# --------------------------------------------------------------- staleness tag
+# Deterministic time-sensitivity heuristic (plan: provenance + staleness). A fact
+# is flagged time_sensitive when it describes IN-FLIGHT state that could be stale
+# next week — so a reviewer knows to re-verify before accepting. The signal is
+# intentionally narrow and pattern-based (no LLM): PR/issue numbers, branch names,
+# in-progress status words, or a concrete date. Durable reference/user/feedback
+# facts default to False. Returning False on any ambiguity is the safe choice (a
+# durable fact wrongly re-verified costs nothing; the marker is advisory only).
+
+# In-progress status words and provenance-y change markers.
+_TIME_SENSITIVE_PHRASE = re.compile(
+    r"\b("
+    r"open|running|in\s+progress|in-progress|wip|pending|blocked|"
+    r"awaiting|currently|right\s+now|as\s+of|so\s+far|underway|ongoing|"
+    r"not\s+yet|still|deployed|shipping|in\s+review|draft|todo|merging|"
+    r"unmerged|outstanding|temporarily|for\s+now"
+    r")\b",
+    re.IGNORECASE,
+)
+# PR / issue / ticket references — e.g. "PR #6", "issue 123", "#181".
+_TIME_SENSITIVE_REF = re.compile(
+    r"(?:\b(?:pr|pull\s+request|issue|ticket|mr)\b[^\n]{0,12})?#\d+", re.IGNORECASE
+)
+# Branch-name shapes — e.g. "branch mm-w2-prov", "on feature/x", "git worktree".
+_TIME_SENSITIVE_BRANCH = re.compile(
+    r"\bbranch\b|\bworktree\b|\b(?:feat|feature|fix|chore|hotfix|release)/[\w.\-/]+"
+    r"|\b[\w]+-[\w]+-[\w]+\b(?=.*\bbranch\b)",
+    re.IGNORECASE,
+)
+# Concrete dates — ISO (2026-05-31), or "May 31"/"Jan 2026" style.
+_TIME_SENSITIVE_DATE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,4}\b",
+    re.IGNORECASE,
+)
+
+
+def is_time_sensitive(p_type: str, body: str) -> bool:
+    """Deterministically flag a fact as time-sensitive (plan: staleness tag).
+
+    Only ``project`` facts are eligible — durable user/feedback/reference facts
+    are by definition meant to outlast the session, so they return False. Within
+    project facts, fire on any of: a PR/issue/ticket number, a branch/worktree
+    reference, an in-progress status word, or a concrete date. Never raises.
+    """
+    if p_type != "project":
+        return False
+    text = (body or "").strip()
+    if not text:
+        return False
+    return bool(
+        _TIME_SENSITIVE_REF.search(text)
+        or _TIME_SENSITIVE_BRANCH.search(text)
+        or _TIME_SENSITIVE_PHRASE.search(text)
+        or _TIME_SENSITIVE_DATE.search(text)
+    )
+
+
 def distill(
     transcript_path: Path,
     *,
@@ -270,6 +328,7 @@ def distill(
                 body=p["body"].strip(),
                 source_session=session_id,
                 source_excerpt=_excerpt(p["body"], scrubbed),
+                time_sensitive=is_time_sensitive(corrected, p.get("body") or ""),
                 confidence=float(p.get("confidence") or 0.0),
                 source_chunk=p.get("source_chunk"),
                 likely_duplicate_of=p.get("likely_duplicate_of") or None,
@@ -290,6 +349,52 @@ def _call_provider(provider: Callable, message: str, max_tokens: int,
         return None
 
 
+# Tokenizer for excerpt matching: lowercase alphanumeric words of length >= 3.
+_WORD = re.compile(r"[a-z0-9]{3,}")
+# Generic words that should not drive a provenance match.
+_STOP = frozenset(
+    "the and for with that this from into are was were has have had not you your "
+    "user assistant they them their will would should could about over under when "
+    "where which while been being does did set get use uses used run runs ran via".split()
+)
+
+
 def _excerpt(body: str, transcript: str, width: int = 240) -> str:
-    """Best-effort short source excerpt for human review. Already-scrubbed input."""
-    return (body or "").strip()[:width]
+    """Locate the transcript snippet a fact most likely came from (provenance).
+
+    Restores the PoC's source-excerpt behavior: rather than echoing the model's
+    rewritten body, find the original transcript passage with the highest word
+    overlap so a human reviewer can verify the fact's origin. The transcript is
+    ALREADY secret-scrubbed (distill scrubs before any excerpt is computed), so
+    the returned snippet contains only [REDACTED:*] placeholders, never secrets.
+
+    Best-effort and deterministic: on no overlap (or empty input) it falls back to
+    the trimmed body. Never raises.
+    """
+    body = (body or "").strip()
+    if not body or not transcript:
+        return body[:width]
+
+    keys = {w for w in _WORD.findall(body.lower()) if w not in _STOP}
+    if not keys:
+        return body[:width]
+
+    # Split the transcript into candidate passages (paragraph/role boundaries),
+    # then sub-split long ones on sentence enders so excerpts stay tight.
+    best_seg, best_hits = "", 0
+    for para in re.split(r"\n\s*\n", transcript):
+        for seg in re.split(r"(?<=[.!?])\s+", para):
+            seg = seg.strip()
+            if not seg:
+                continue
+            words = set(_WORD.findall(seg.lower()))
+            hits = len(keys & words)
+            if hits > best_hits:
+                best_hits, best_seg = hits, seg
+
+    if best_hits == 0:
+        return body[:width]
+    snippet = re.sub(r"^(USER|ASSISTANT):\s*", "", best_seg).strip()
+    if len(snippet) > width:
+        snippet = snippet[:width].rstrip() + "…"
+    return snippet

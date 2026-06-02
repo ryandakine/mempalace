@@ -75,6 +75,12 @@ class MemoryProposal:
     source_session: str
     id: str = ""
     source_excerpt: str = ""
+    # Staleness / time-sensitivity tag (plan: provenance + staleness). Set by a
+    # deterministic heuristic in distill.py: in-flight project state (PR numbers,
+    # branch names, "open/running/in progress", concrete dates) → True; durable
+    # reference/user/feedback facts → False. A True tag tells a human reviewer to
+    # re-verify the fact before accepting it.
+    time_sensitive: bool = False
     confidence: float = 0.0
     source_chunk: Any = None
     likely_duplicate_of: Optional[str] = None
@@ -96,7 +102,8 @@ class MemoryProposal:
     def from_dict(cls, d: dict) -> "MemoryProposal":
         known = {
             "name", "type", "description", "body", "source_session", "id",
-            "source_excerpt", "confidence", "source_chunk", "likely_duplicate_of", "dedup",
+            "source_excerpt", "time_sensitive", "confidence", "source_chunk",
+            "likely_duplicate_of", "dedup",
         }
         return cls(**{k: v for k, v in d.items() if k in known})
 
@@ -128,4 +135,10 @@ def validate_proposal(p: Any) -> tuple[bool, str]:
     dup = p.get("likely_duplicate_of")
     if dup is not None and not isinstance(dup, str):
         return False, "likely_duplicate_of not a string/null"
+    exc = p.get("source_excerpt")
+    if exc is not None and not isinstance(exc, str):
+        return False, "source_excerpt not a string"
+    ts = p.get("time_sensitive")
+    if ts is not None and not isinstance(ts, bool):
+        return False, "time_sensitive not a bool"
     return True, ""
