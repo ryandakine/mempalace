@@ -260,6 +260,71 @@ def is_time_sensitive(p_type: str, body: str) -> bool:
     )
 
 
+def _build_message(existing_index: str, transcript: str, today: str) -> str:
+    date_line = f"TODAY IS {today}.\n\n" if today else ""
+    return (
+        f"{date_line}EXISTING MEMORIES (name: description):\n{existing_index}\n\n"
+        f"{'=' * 40}\nSESSION TRANSCRIPT:\n{transcript}\n\n"
+        f"Return the JSON array now."
+    )
+
+
+def _window(text: str, budget: int) -> List[str]:
+    """Split a transcript into <=budget-char windows on paragraph boundaries.
+
+    Large sessions blow the provider's per-message char limit once the existing-
+    memory index + boilerplate are added; windowing keeps each call in-budget
+    instead of silently dropping the whole (often richest) session.
+    """
+    if budget <= 0:
+        budget = 20_000
+    if len(text) <= budget:
+        return [text]
+    windows: List[str] = []
+    buf = ""
+    for para in text.split("\n\n"):
+        if buf and len(buf) + len(para) + 2 > budget:
+            windows.append(buf)
+            buf = ""
+        if len(para) > budget:                  # single oversized paragraph
+            if buf:
+                windows.append(buf)
+                buf = ""
+            for i in range(0, len(para), budget):
+                windows.append(para[i:i + budget])
+            continue
+        buf = f"{buf}\n\n{para}" if buf else para
+    if buf:
+        windows.append(buf)
+    return windows
+
+
+def _distill_window(provider: Callable, message: str, max_tokens: int,
+                    timeout: float, session_id: str) -> List[dict]:
+    """One provider call (+ one retry on unparseable) → validated raw proposal dicts."""
+    raw = _call_provider(provider, message, max_tokens, timeout)
+    if raw is None:
+        return []
+    proposals = parse_json_array(raw)
+    if proposals is None or not isinstance(proposals, list):
+        log.info("distill output unparseable for %s — retrying once", session_id)
+        raw = _call_provider(provider, message + _RETRY_SUFFIX, max_tokens, timeout)
+        if raw is None:
+            return []
+        proposals = parse_json_array(raw)
+        if proposals is None or not isinstance(proposals, list):
+            log.warning("distill output still unparseable for %s — rejecting", session_id)
+            return []
+    valid: List[dict] = []
+    for p in proposals:
+        ok, reason = validate_proposal(p)
+        if not ok:
+            log.info("rejected proposal in %s: %s", session_id, reason)
+            continue
+        valid.append(p)
+    return valid
+
+
 def distill(
     transcript_path: Path,
     *,
@@ -273,9 +338,11 @@ def distill(
 ) -> List[MemoryProposal]:
     """Whole-session distill → validated MemoryProposal[]. Never raises.
 
-    ``provider`` is one of providers.PROVIDERS values (already wrapped with
-    timeout/backoff). A hard provider failure or unparseable-after-retry output
-    yields [] and is logged — the run continues (plan §4.1).
+    Large transcripts are WINDOWED so (index + window + boilerplate) stays under
+    the provider's per-message char limit, instead of dropping the whole session
+    (recent heavy sessions routinely exceed 200k). A hard provider failure or
+    unparseable-after-retry output for a window yields nothing for that window and
+    is logged — the run continues (plan §4.1).
     """
     segs = extract_segments(Path(transcript_path))
     if not segs:
@@ -284,37 +351,33 @@ def distill(
 
     transcript = build_transcript(segs)
     # secret_scrub BEFORE the provider (and before any disk write of excerpts).
-    scrubbed, _redacted = secret_scrub(transcript[:char_cap])
+    scrubbed, _redacted = secret_scrub(transcript)
 
-    date_line = f"TODAY IS {today}.\n\n" if today else ""
-    base_message = (
-        f"{date_line}EXISTING MEMORIES (name: description):\n{existing_index}\n\n"
-        f"{'=' * 40}\nSESSION TRANSCRIPT:\n{scrubbed}\n\n"
-        f"Return the JSON array now."
-    )
+    # Per-window transcript budget: leave room for the existing-index + boilerplate
+    # (both count toward the provider's message char limit) plus a safety margin.
+    overhead = len(_build_message(existing_index, "", today))
+    budget = max(char_cap - overhead - 2_000, 20_000)
+    windows = _window(scrubbed, budget)
+    if len(windows) > 1:
+        log.info("%s is large (%d chars) — distilling in %d windows",
+                 session_id, len(scrubbed), len(windows))
 
-    raw = _call_provider(provider, base_message, max_tokens, timeout)
-    if raw is None:
-        return []
-
-    proposals = parse_json_array(raw)
-    if proposals is None or not isinstance(proposals, list):
-        # one retry with a stricter nudge (plan §4.2)
-        log.info("distill output unparseable for %s — retrying once", session_id)
-        raw = _call_provider(provider, base_message + _RETRY_SUFFIX, max_tokens, timeout)
-        if raw is None:
-            return []
-        proposals = parse_json_array(raw)
-        if proposals is None or not isinstance(proposals, list):
-            log.warning("distill output still unparseable for %s — rejecting", session_id)
-            return []
+    seen_keys = set()
+    raw_props: List[dict] = []
+    for w in windows:
+        for p in _distill_window(
+            provider, _build_message(existing_index, w, today),
+            max_tokens, timeout, session_id,
+        ):
+            # de-dup the same fact surfacing in overlapping/adjacent windows
+            key = (p["name"].strip().lower(), p["body"].strip().lower()[:80])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            raw_props.append(p)
 
     out: List[MemoryProposal] = []
-    for p in proposals:
-        ok, reason = validate_proposal(p)
-        if not ok:
-            log.info("rejected proposal in %s: %s", session_id, reason)
-            continue
+    for p in raw_props:
         # Deterministic post-classification nudge (narrow user→feedback correction).
         corrected = nudge_type(p["type"], p.get("body") or "")
         if corrected != p["type"]:
