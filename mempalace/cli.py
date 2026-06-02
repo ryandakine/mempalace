@@ -208,9 +208,11 @@ def cmd_repair(args):
     print(f"  Backing up to {backup_path}...")
     shutil.copytree(palace_path, backup_path)
 
+    from .config import CHROMA_COLLECTION_METADATA
+
     print("  Rebuilding collection...")
     client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
+    new_col = client.create_collection("mempalace_drawers", metadata=CHROMA_COLLECTION_METADATA)
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
@@ -223,7 +225,144 @@ def cmd_repair(args):
 
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
     print(f"  Backup saved at {backup_path}")
+
+
+def cmd_migrate(args):
+    """Migrate palace to cosine distance metric and consolidate storage."""
+    import chromadb
+    import shutil
+    from .config import CHROMA_COLLECTION_METADATA
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+
+    if not os.path.isdir(palace_path):
+        print(f"\n  No palace found at {palace_path}")
+        return
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Migration")
+    print(f"{'=' * 55}\n")
+    print(f"  Palace: {palace_path}")
+
+    # Check if migration is needed
+    try:
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_collection("mempalace_drawers")
+        total = col.count()
+        print(f"  Drawers found: {total}")
+    except Exception as e:
+        print(f"  Error reading palace: {e}")
+        return
+
+    if total == 0:
+        print("  Empty palace. Nothing to migrate.")
+        return
+
+    # Check current distance metric
+    meta = col.metadata or {}
+    current_space = meta.get("hnsw:space", "l2")
+    if current_space == "cosine":
+        print(f"  Already using cosine distance. No migration needed.")
+        return
+
+    print(f"  Current distance metric: {current_space} (needs cosine)")
+    print(f"  This will extract all drawers, recreate with cosine metric,")
+    print(f"  and re-insert them. A backup will be saved first.\n")
+
+    # Extract all drawers
+    print("  Extracting drawers...")
+    batch_size = 5000
+    all_ids, all_docs, all_metas = [], [], []
+    offset = 0
+    while offset < total:
+        batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
+        all_ids.extend(batch["ids"])
+        all_docs.extend(batch["documents"])
+        all_metas.extend(batch["metadatas"])
+        offset += batch_size
+    print(f"  Extracted {len(all_ids)} drawers")
+
+    # Backup
+    backup_path = palace_path + ".pre_migrate_backup"
+    if os.path.exists(backup_path):
+        print(f"  Removing old backup at {backup_path}...")
+        shutil.rmtree(backup_path)
+    print(f"  Backing up to {backup_path}...")
+    shutil.copytree(palace_path, backup_path)
+
+    # Recreate with cosine metric
+    print("  Rebuilding collection with cosine distance...")
+    client.delete_collection("mempalace_drawers")
+    new_col = client.create_collection("mempalace_drawers", metadata=CHROMA_COLLECTION_METADATA)
+
+    filed = 0
+    for i in range(0, len(all_ids), batch_size):
+        batch_ids = all_ids[i : i + batch_size]
+        batch_docs = all_docs[i : i + batch_size]
+        batch_metas = all_metas[i : i + batch_size]
+        new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+        filed += len(batch_ids)
+        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+
+    # Consolidate KG into palace_path if it exists elsewhere
+    default_kg = os.path.expanduser("~/.mempalace/knowledge_graph.sqlite3")
+    palace_kg = os.path.join(palace_path, "knowledge_graph.sqlite3")
+    if os.path.exists(default_kg) and not os.path.exists(palace_kg):
+        print(f"  Moving knowledge graph into palace directory...")
+        shutil.copy2(default_kg, palace_kg)
+        print(f"  KG copied to {palace_kg}")
+        print(f"  (original kept at {default_kg} as backup)")
+
+    print(f"\n  Migration complete. {filed} drawers migrated to cosine distance.")
+    print(f"  Backup at: {backup_path}")
     print(f"\n{'=' * 55}\n")
+
+
+def cmd_rebuild_index(args):
+    """Build or rebuild the FTS5 keyword search index from ChromaDB data."""
+    from .config import get_palace_collection
+    from .fts_index import FTSIndex
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    col = get_palace_collection(palace_path)
+    if not col:
+        print(f"\n  No palace found at {palace_path}")
+        return
+
+    total = col.count()
+    print(f"\n  Palace: {palace_path}")
+    print(f"  Drawers: {total}")
+    print(f"  Building FTS5 keyword index...")
+
+    fts = FTSIndex(palace_path)
+    indexed = fts.rebuild(col)
+    print(f"  Indexed {indexed} drawers into FTS5.")
+    print(f"  Hybrid search is now available.\n")
+
+
+def cmd_check_index(args):
+    """Check consistency between ChromaDB and FTS5 indexes."""
+    from .config import get_palace_collection
+    from .fts_index import FTSIndex
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    col = get_palace_collection(palace_path)
+    if not col:
+        print(f"\n  No palace found at {palace_path}")
+        return
+
+    fts = FTSIndex(palace_path)
+    result = fts.check_consistency(col)
+
+    print(f"\n  Palace: {palace_path}")
+    print(f"  ChromaDB drawers: {result['chromadb_count']}")
+    print(f"  FTS5 rows:        {result['fts_count']}")
+
+    if result["consistent"]:
+        print(f"  Status: CONSISTENT\n")
+    else:
+        print(f"  Status: DRIFT DETECTED ({result['drift']} difference)")
+        print(f"  Run: mempalace rebuild-index to fix\n")
 
 
 def cmd_hook(args):
@@ -500,6 +639,24 @@ def main():
         help="Rebuild palace vector index from stored data (fixes segfaults after corruption)",
     )
 
+    # migrate
+    sub.add_parser(
+        "migrate",
+        help="Migrate palace to cosine distance metric (fixes similarity scoring)",
+    )
+
+    # rebuild-index
+    sub.add_parser(
+        "rebuild-index",
+        help="Build FTS5 keyword search index from existing palace data",
+    )
+
+    # check-index
+    sub.add_parser(
+        "check-index",
+        help="Check consistency between ChromaDB and FTS5 indexes",
+    )
+
     # status
     sub.add_parser("status", help="Show what's been filed")
 
@@ -534,6 +691,9 @@ def main():
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
+        "migrate": cmd_migrate,
+        "rebuild-index": cmd_rebuild_index,
+        "check-index": cmd_check_index,
         "status": cmd_status,
     }
     dispatch[args.command](args)

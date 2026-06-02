@@ -25,13 +25,15 @@ import logging
 import hashlib
 from datetime import datetime
 
-from .config import MempalaceConfig
-from .version import __version__
-from .searcher import search_memories
-from .palace_graph import traverse, find_tunnels, graph_stats
-import chromadb
+# Redirect stdout to stderr BEFORE any imports that might print,
+# so module-level init (ChromaDB, KnowledgeGraph) can't corrupt JSON-RPC.
+_rpc_out = sys.stdout
+sys.stdout = sys.stderr
 
-from .knowledge_graph import KnowledgeGraph
+from .config import MempalaceConfig  # noqa: E402
+from .version import __version__  # noqa: E402
+from .palace_graph import traverse, find_tunnels, graph_stats  # noqa: E402
+from .knowledge_graph import KnowledgeGraph  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -60,20 +62,16 @@ else:
     _kg = KnowledgeGraph()
 
 
-_client_cache = None
 _collection_cache = None
 
 
 def _get_collection(create=False):
     """Return the ChromaDB collection, caching the client between calls."""
-    global _client_cache, _collection_cache
+    global _collection_cache
     try:
-        if _client_cache is None:
-            _client_cache = chromadb.PersistentClient(path=_config.palace_path)
-        if create:
-            _collection_cache = _client_cache.get_or_create_collection(_config.collection_name)
-        elif _collection_cache is None:
-            _collection_cache = _client_cache.get_collection(_config.collection_name)
+        if create or _collection_cache is None:
+            from .config import get_palace_collection
+            _collection_cache = get_palace_collection(_config.palace_path, create=create)
         return _collection_cache
     except Exception:
         return None
@@ -90,6 +88,8 @@ def _no_palace():
 
 
 def tool_status():
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -97,8 +97,7 @@ def tool_status():
     wings = {}
     rooms = {}
     try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col):
             w = m.get("wing", "unknown")
             r = m.get("room", "unknown")
             wings[w] = wings.get(w, 0) + 1
@@ -149,13 +148,14 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
 def tool_list_wings():
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
     wings = {}
     try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col):
             w = m.get("wing", "unknown")
             wings[w] = wings.get(w, 0) + 1
     except Exception:
@@ -164,16 +164,15 @@ def tool_list_wings():
 
 
 def tool_list_rooms(wing: str = None):
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
     rooms = {}
+    where = {"wing": wing} if wing else None
     try:
-        kwargs = {"include": ["metadatas"], "limit": 10000}
-        if wing:
-            kwargs["where"] = {"wing": wing}
-        all_meta = col.get(**kwargs)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col, where=where):
             r = m.get("room", "unknown")
             rooms[r] = rooms.get(r, 0) + 1
     except Exception:
@@ -182,13 +181,14 @@ def tool_list_rooms(wing: str = None):
 
 
 def tool_get_taxonomy():
+    from .config import iter_all_metadata
+
     col = _get_collection()
     if not col:
         return _no_palace()
     taxonomy = {}
     try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
+        for m in iter_all_metadata(col):
             w = m.get("wing", "unknown")
             r = m.get("room", "unknown")
             if w not in taxonomy:
@@ -199,13 +199,16 @@ def tool_get_taxonomy():
     return {"taxonomy": taxonomy}
 
 
-def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
-    return search_memories(
+def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None, mode: str = "hybrid"):
+    from .searcher import hybrid_search
+
+    return hybrid_search(
         query,
         palace_path=_config.palace_path,
         wing=wing,
         room=room,
         n_results=limit,
+        mode=mode,
     )
 
 
@@ -371,6 +374,18 @@ def tool_kg_stats():
     return _kg.stats()
 
 
+def tool_kg_contradictions():
+    """Find entities with conflicting current facts for exclusive predicates."""
+    from .knowledge_graph import KnowledgeGraph
+
+    results = _kg.find_contradictions()
+    return {
+        "contradictions": results,
+        "count": len(results),
+        "exclusive_predicates": sorted(KnowledgeGraph.EXCLUSIVE_PREDICATES),
+    }
+
+
 # ==================== AGENT DIARY ====================
 
 
@@ -431,18 +446,33 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         return _no_palace()
 
     try:
-        results = col.get(
-            where={"$and": [{"wing": wing}, {"room": "diary"}]},
-            include=["documents", "metadatas"],
-            limit=10000,
-        )
+        # Paginate to avoid silent truncation at 10k
+        all_docs = []
+        all_metas = []
+        offset = 0
+        batch_size = 5000
+        while True:
+            batch = col.get(
+                where={"$and": [{"wing": wing}, {"room": "diary"}]},
+                include=["documents", "metadatas"],
+                limit=batch_size,
+                offset=offset,
+            )
+            ids = batch.get("ids", []) or []
+            if not ids:
+                break
+            all_docs.extend(batch["documents"])
+            all_metas.extend(batch["metadatas"])
+            if len(ids) < batch_size:
+                break
+            offset += batch_size
 
-        if not results["ids"]:
+        if not all_docs:
             return {"agent": agent_name, "entries": [], "message": "No diary entries yet."}
 
         # Combine and sort by timestamp
         entries = []
-        for doc, meta in zip(results["documents"], results["metadatas"]):
+        for doc, meta in zip(all_docs, all_metas):
             entries.append(
                 {
                     "date": meta.get("date", ""),
@@ -458,7 +488,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         return {
             "agent": agent_name,
             "entries": entries,
-            "total": len(results["ids"]),
+            "total": len(all_docs),
             "showing": len(entries),
         }
     except Exception as e:
@@ -579,6 +609,11 @@ TOOLS = {
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_kg_stats,
     },
+    "mempalace_kg_contradictions": {
+        "description": "Find entities with conflicting current facts (e.g. two open 'works_at' triples). Shows unresolved contradictions for exclusive predicates.",
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_kg_contradictions,
+    },
     "mempalace_traverse": {
         "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
         "input_schema": {
@@ -614,7 +649,7 @@ TOOLS = {
         "handler": tool_graph_stats,
     },
     "mempalace_search": {
-        "description": "Semantic search. Returns verbatim drawer content with similarity scores.",
+        "description": "Search the palace. Hybrid mode combines semantic similarity with keyword matching for best results.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -622,6 +657,11 @@ TOOLS = {
                 "limit": {"type": "integer", "description": "Max results (default 5)"},
                 "wing": {"type": "string", "description": "Filter by wing (optional)"},
                 "room": {"type": "string", "description": "Filter by room (optional)"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["hybrid", "semantic", "keyword"],
+                    "description": "Search mode: hybrid (default, best quality), semantic (embedding similarity only), keyword (exact term matching only)",
+                },
             },
             "required": ["query"],
         },
@@ -800,8 +840,8 @@ def main():
             request = json.loads(line)
             response = handle_request(request)
             if response is not None:
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
+                _rpc_out.write(json.dumps(response) + "\n")
+                _rpc_out.flush()
         except KeyboardInterrupt:
             break
         except Exception as e:

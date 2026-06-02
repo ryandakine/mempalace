@@ -394,12 +394,9 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 def get_collection(palace_path: str):
-    os.makedirs(palace_path, exist_ok=True)
-    client = chromadb.PersistentClient(path=palace_path)
-    try:
-        return client.get_collection("mempalace_drawers")
-    except Exception:
-        return client.create_collection("mempalace_drawers")
+    from .config import get_palace_collection
+
+    return get_palace_collection(palace_path, create=True)
 
 
 def file_already_mined(collection, source_file: str) -> bool:
@@ -667,16 +664,17 @@ def status(palace_path: str):
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         return
 
-    # Count by wing and room
-    r = col.get(limit=10000, include=["metadatas"])
-    metas = r["metadatas"]
+    # Count by wing and room (paginated to avoid silent truncation at 10k)
+    from .config import iter_all_metadata
 
     wing_rooms = defaultdict(lambda: defaultdict(int))
-    for m in metas:
+    total = 0
+    for m in iter_all_metadata(col):
         wing_rooms[m.get("wing", "?")][m.get("room", "?")] += 1
+        total += 1
 
     print(f"\n{'=' * 55}")
-    print(f"  MemPalace Status — {len(metas)} drawers")
+    print(f"  MemPalace Status — {total} drawers")
     print(f"{'=' * 55}\n")
     for wing, rooms in sorted(wing_rooms.items()):
         print(f"  WING: {wing}")

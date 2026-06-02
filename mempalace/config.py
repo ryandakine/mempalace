@@ -11,6 +11,10 @@ from pathlib import Path
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 
+# ChromaDB collection metadata — use cosine distance for correct similarity scoring.
+# The default (L2/Euclidean) produces unbounded distances that break `1 - dist` scoring.
+CHROMA_COLLECTION_METADATA = {"hnsw:space": "cosine"}
+
 DEFAULT_TOPIC_WINGS = [
     "emotions",
     "consciousness",
@@ -60,6 +64,54 @@ DEFAULT_HALL_KEYWORDS = {
     "family": ["family", "kids", "children", "daughter", "son", "parent", "mother", "father"],
     "creative": ["game", "gameplay", "player", "app", "design", "art", "music", "story"],
 }
+
+
+def iter_all_metadata(collection, where=None, batch_size: int = 5000):
+    """Yield all metadatas from a ChromaDB collection in batches.
+
+    Avoids the silent truncation of `limit=10000` by paginating through
+    the entire collection. Use this instead of `col.get(limit=10000)`.
+    """
+    offset = 0
+    while True:
+        kwargs = {"include": ["metadatas"], "limit": batch_size, "offset": offset}
+        if where:
+            kwargs["where"] = where
+        batch = collection.get(**kwargs)
+        metas = batch.get("metadatas", []) or []
+        if not metas:
+            break
+        yield from metas
+        if len(metas) < batch_size:
+            break
+        offset += batch_size
+
+
+def get_palace_collection(palace_path: str, create: bool = False):
+    """Single entry point for ChromaDB collection access.
+
+    All callers should use this instead of raw chromadb.PersistentClient.
+    Ensures consistent cosine distance metric across all creation sites.
+
+    Args:
+        palace_path: Path to the palace data directory.
+        create: If True, create the collection if it doesn't exist.
+
+    Returns:
+        ChromaDB collection, or None if collection doesn't exist and create=False.
+    """
+    import chromadb
+
+    os.makedirs(palace_path, exist_ok=True)
+    client = chromadb.PersistentClient(path=palace_path)
+    if create:
+        return client.get_or_create_collection(
+            DEFAULT_COLLECTION_NAME, metadata=CHROMA_COLLECTION_METADATA
+        )
+    try:
+        return client.get_collection(DEFAULT_COLLECTION_NAME)
+    except Exception:
+        return None
 
 
 class MempalaceConfig:

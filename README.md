@@ -130,7 +130,7 @@ Restart Claude Code, then type `/skills` to verify "mempalace" appears.
 claude mcp add mempalace -- python -m mempalace.mcp_server
 ```
 
-Now your AI has 19 tools available through MCP. Ask it anything:
+Now your AI has 20 tools available through MCP. Ask it anything:
 
 > *"What did we decide about auth last month?"*
 
@@ -458,7 +458,7 @@ claude plugin install --scope user mempalace
 claude mcp add mempalace -- python -m mempalace.mcp_server
 ```
 
-### 19 Tools
+### 20 Tools
 
 **Palace (read)**
 
@@ -487,6 +487,7 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 | `mempalace_kg_add` | Add facts |
 | `mempalace_kg_invalidate` | Mark facts as ended |
 | `mempalace_kg_timeline` | Chronological entity story |
+| `mempalace_kg_contradictions` | Surface conflicting facts in the graph |
 | `mempalace_kg_stats` | Graph overview |
 
 **Navigation**
@@ -630,12 +631,12 @@ Plain text. Becomes Layer 0 — loaded every session.
 | `cli.py` | CLI entry point |
 | `config.py` | Configuration loading and defaults |
 | `normalize.py` | Converts 5 chat formats to standard transcript |
-| `mcp_server.py` | MCP server — 19 tools, AAAK auto-teach, memory protocol |
+| `mcp_server.py` | MCP server — 20 tools, AAAK auto-teach, memory protocol |
 | `miner.py` | Project file ingest |
 | `convo_miner.py` | Conversation ingest — chunks by exchange pair |
 | `searcher.py` | Semantic search via ChromaDB |
 | `layers.py` | 4-layer memory stack |
-| `dialect.py` | AAAK compression — 30x lossless |
+| `dialect.py` | AAAK compression — lossy abbreviation dialect |
 | `knowledge_graph.py` | Temporal entity-relationship graph (SQLite) |
 | `palace_graph.py` | Room-based navigation graph |
 | `onboarding.py` | Guided setup — generates AAAK bootstrap + wing config |
@@ -654,7 +655,7 @@ mempalace/
 ├── README.md                  ← you are here
 ├── mempalace/                 ← core package (README)
 │   ├── cli.py                 ← CLI entry point
-│   ├── mcp_server.py          ← MCP server (19 tools)
+│   ├── mcp_server.py          ← MCP server (20 tools)
 │   ├── knowledge_graph.py     ← temporal entity graph
 │   ├── palace_graph.py        ← room navigation graph
 │   ├── dialect.py             ← AAAK compression
@@ -679,7 +680,7 @@ mempalace/
 │   └── mcp_setup.md
 ├── tests/                     ← test suite (README)
 ├── assets/                    ← logo + brand assets
-└── pyproject.toml             ← package config (v3.0.0)
+└── pyproject.toml             ← package config (v3.0.12)
 ```
 
 ---
@@ -687,7 +688,7 @@ mempalace/
 ## Requirements
 
 - Python 3.9+
-- `chromadb>=0.4.0`
+- `chromadb>=0.5.0,<0.7`
 - `pyyaml>=6.0`
 
 No API key. No internet after install. Everything local.
@@ -707,7 +708,7 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.
 MIT — see [LICENSE](LICENSE).
 
 <!-- Link Definitions -->
-[version-shield]: https://img.shields.io/badge/version-3.0.0-4dc9f6?style=flat-square&labelColor=0a0e14
+[version-shield]: https://img.shields.io/badge/version-3.0.12-4dc9f6?style=flat-square&labelColor=0a0e14
 [release-link]: https://github.com/milla-jovovich/mempalace/releases
 [python-shield]: https://img.shields.io/badge/python-3.9+-7dd8f8?style=flat-square&labelColor=0a0e14&logo=python&logoColor=7dd8f8
 [python-link]: https://www.python.org/
