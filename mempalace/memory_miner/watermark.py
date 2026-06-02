@@ -20,8 +20,24 @@ import json
 import os
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
+
+
+def parse_since(value: str) -> float:
+    """Parse a ``YYYY-MM-DD`` --since value → POSIX timestamp at local midnight.
+
+    Raises ``ValueError`` with an actionable message on malformed input so the
+    CLI can surface a clean error (not a traceback).
+    """
+    try:
+        dt = datetime.strptime(value.strip(), "%Y-%m-%d")
+    except (ValueError, AttributeError) as e:
+        raise ValueError(
+            f"invalid --since {value!r}: expected YYYY-MM-DD (e.g. 2026-05-01)"
+        ) from e
+    return dt.timestamp()
 
 
 def state_dir() -> Path:
@@ -146,8 +162,31 @@ def count_records(transcript: Path) -> int:
     return n
 
 
-def discover_transcripts(roots: List[Path], pattern: str = "*.jsonl") -> List[Path]:
-    """Find candidate transcripts under the given roots (sorted, stable)."""
+def discover_transcripts(
+    roots: List[Path],
+    pattern: str = "*.jsonl",
+    *,
+    since_ts: Optional[float] = None,
+    newest_first: bool = False,
+) -> List[Path]:
+    """Find candidate transcripts under the given roots (sorted, stable).
+
+    Backlog cost controls (the live backlog is ~1.6k transcripts):
+      - ``since_ts``: keep only files with mtime >= this POSIX timestamp.
+        Files whose stat() fails are dropped (cannot prove they qualify).
+      - ``newest_first``: order by mtime descending instead of by path, so a
+        capped (``--limit``) run hits the most RECENT sessions, not arbitrary
+        os.walk-order ones. Ties broken by path for stability.
+
+    Compaction note: compaction-continuation transcripts (a session resumed
+    after auto-compact lands in a fresh file that re-states earlier context)
+    are NOT de-duped here. They are distinct files with distinct stems, so the
+    record-count watermark treats each independently. A future enhancement
+    could group continuations by a shared session/lineage id embedded in the
+    transcript header and skip re-mining the carried-over prefix; that belongs
+    in the distill/dedup layer, not in plain file discovery, so it is left out
+    deliberately to avoid over-engineering discovery.
+    """
     found: List[Path] = []
     for root in roots:
         root = Path(root)
@@ -160,4 +199,27 @@ def discover_transcripts(roots: List[Path], pattern: str = "*.jsonl") -> List[Pa
         if p not in seen:
             seen.add(p)
             out.append(p)
-    return out
+
+    if since_ts is None and not newest_first:
+        return out
+
+    # Annotate with mtime once; files we cannot stat are excluded when filtering
+    # by --since (we can't prove they qualify) and sorted last when newest-first.
+    annotated: List[Tuple[float, Path]] = []
+    for p in out:
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            if since_ts is not None:
+                continue  # cannot prove mtime >= cutoff → drop
+            mtime = float("-inf")
+        if since_ts is not None and mtime < since_ts:
+            continue
+        annotated.append((mtime, p))
+
+    if newest_first:
+        # mtime desc, path asc for deterministic tie-breaking
+        annotated.sort(key=lambda mp: (-mp[0], str(mp[1])))
+        return [p for _, p in annotated]
+
+    return [p for _, p in annotated]

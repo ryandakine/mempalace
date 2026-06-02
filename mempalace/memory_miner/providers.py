@@ -10,7 +10,8 @@ call is wrapped with:
 
 Providers:
   grok   (default) — local xAI proxy at http://127.0.0.1:8765/ask_grok (PoC-proven)
-  local            — local OpenAI-compatible endpoint (rig/Fold6), $0
+  local            — local OpenAI-compatible endpoint (rig/Fold6), $0;
+                     URL from MINER_LOCAL_URL, model from MINER_LOCAL_MODEL
   claude           — ~/bin/ask-claude (Anthropic API, OFF the CC subscription)
   none             — diagnostic only; raises if asked to generate (never writes)
 """
@@ -25,9 +26,30 @@ import urllib.error
 import urllib.request
 
 GROK_PROXY = os.environ.get("GROK_PROXY_URL", "http://127.0.0.1:8765/ask_grok")
-LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://127.0.0.1:11434/v1/chat/completions")
-LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "gemma2")
 ASK_CLAUDE_BIN = os.environ.get("ASK_CLAUDE_BIN", os.path.expanduser("~/bin/ask-claude"))
+
+# local provider: OpenAI-compatible chat endpoint on the rig/Fold6 ($0).
+# Primary env vars are MINER_LOCAL_URL / MINER_LOCAL_MODEL; LOCAL_LLM_* are
+# accepted as back-compat fallbacks. Resolved at CALL time (not import) so the
+# env is read live and the value is patchable in tests.
+DEFAULT_LOCAL_MODEL = "gemma2"
+
+
+def _local_url() -> str:
+    """Resolve the local endpoint URL from env, or "" if unconfigured."""
+    return (
+        os.environ.get("MINER_LOCAL_URL")
+        or os.environ.get("LOCAL_LLM_URL")
+        or ""
+    ).strip()
+
+
+def _local_model() -> str:
+    return (
+        os.environ.get("MINER_LOCAL_MODEL")
+        or os.environ.get("LOCAL_LLM_MODEL")
+        or DEFAULT_LOCAL_MODEL
+    ).strip()
 
 RETRYABLE_HTTP = {429, 500, 502, 503, 504}
 
@@ -93,12 +115,30 @@ def grok_provider(system: str, message: str, *, timeout: float = 180.0,
 
 def local_provider(system: str, message: str, *, timeout: float = 300.0,
                    max_tokens: int = 8000, sleep=time.sleep) -> str:
-    """Distill via a local OpenAI-compatible chat endpoint (Ollama/llama.cpp). $0."""
+    """Distill via a local OpenAI-compatible chat endpoint (Ollama/llama.cpp). $0.
+
+    URL comes from ``MINER_LOCAL_URL`` (or back-compat ``LOCAL_LLM_URL``); model
+    from ``MINER_LOCAL_MODEL`` (or ``LOCAL_LLM_MODEL``, default ``gemma2``). If no
+    URL is configured, raise ``ProviderError`` *before* any network call — the
+    caller (distill._call_provider) catches it as skip+log, so an unconfigured
+    local provider degrades that transcript gracefully instead of crashing the
+    run or silently hitting a wrong localhost port. Goes through the SAME
+    ``_with_retry`` timeout/backoff wrapper as grok/claude.
+    """
+    url = _local_url()
+    if not url:
+        raise ProviderError(
+            "local provider requires MINER_LOCAL_URL "
+            "(OpenAI-compatible chat endpoint, e.g. http://127.0.0.1:11434/v1/chat/completions); "
+            "set it (and optionally MINER_LOCAL_MODEL) or run with --provider grok"
+        )
+    model = _local_model()
+
     def _call():
         body = _http_post_json(
-            LOCAL_LLM_URL,
+            url,
             {
-                "model": LOCAL_LLM_MODEL,
+                "model": model,
                 "max_tokens": max_tokens,
                 "messages": [
                     {"role": "system", "content": system},
