@@ -28,6 +28,7 @@ from .watermark import (
     Watermark,
     count_records,
     discover_transcripts,
+    parse_since,
     run_lock,
 )
 
@@ -61,11 +62,21 @@ def cmd_run(args) -> int:
     if args.provider == "none":
         log.info("provider=none is diagnostic-only; it never distills or writes.")
 
+    since_ts = None
+    if args.since:
+        try:
+            since_ts = parse_since(args.since)
+        except ValueError as e:
+            log.error("%s", e)
+            return 2
+
     index = StoreIndex.from_dir(memory_dir)
     existing_index = index.index_lines()
 
     roots = [Path(r) for r in (args.root or [str(default_transcript_root())])]
-    transcripts = discover_transcripts(roots)
+    transcripts = discover_transcripts(
+        roots, since_ts=since_ts, newest_first=args.newest_first
+    )
 
     try:
         lock_ctx = run_lock()
@@ -175,6 +186,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--provider", default="grok", choices=["grok", "local", "claude", "none"])
     r.add_argument("--root", action="append", help="transcript root(s) (default ~/.claude/projects)")
     r.add_argument("--limit", type=int, default=0, help="max new transcripts this run (0=all)")
+    r.add_argument("--since", default="",
+                   help="only mine transcripts with mtime >= YYYY-MM-DD (backlog scoping)")
+    r.add_argument("--newest-first", action="store_true",
+                   help="with --limit, mine the N most RECENT transcripts (mtime desc)")
     r.add_argument("--timeout", type=float, default=180.0)
     r.set_defaults(func=cmd_run)
 
