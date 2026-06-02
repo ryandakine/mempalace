@@ -22,6 +22,25 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .dedup import slugify
+from .tuning import record_decision
+
+
+def _log_decision_best_effort(prop: Dict, action: str) -> None:
+    """Capture an accept/merge decision into the decisions ledger.
+
+    Best-effort only (Task #6): a logging failure must never break a successful
+    accept. The decisions ledger uses its own default path (global
+    ~/.claude/memory-miner/decisions.jsonl); record_decision already swallows
+    write errors, but we guard here too for total isolation.
+    """
+    try:
+        record_decision(
+            prop.get("id"), action,
+            type=prop.get("type"),
+            score=prop.get("confidence"),
+        )
+    except Exception:  # pragma: no cover - record_decision is already guarded
+        pass
 
 # MEMORY.md section headers per store type.
 SECTION = {
@@ -318,6 +337,7 @@ def accept(
             append_ledger(ledger_path, prop, filename)
             if dual_write_mempalace and changed:
                 _dual_write(prop, filename)
+            _log_decision_best_effort(prop, "merged")
             results.append({
                 "id": prop.get("id"), "file": filename,
                 "type": prop.get("type"), "action": "merge",
@@ -335,6 +355,7 @@ def accept(
         append_ledger(ledger_path, prop, filename)
         if dual_write_mempalace:
             _dual_write(prop, filename)
+        _log_decision_best_effort(prop, "accepted")
         results.append({
             "id": prop.get("id"), "file": filename,
             "type": prop.get("type"), "action": "create",
