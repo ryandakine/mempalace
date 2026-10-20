@@ -68,13 +68,11 @@ _collection_cache = None
 def _get_collection(create=False):
     """Return the ChromaDB collection, caching the client between calls."""
     global _collection_cache
-    try:
-        if create or _collection_cache is None:
-            from .config import get_palace_collection
-            _collection_cache = get_palace_collection(_config.palace_path, create=create)
-        return _collection_cache
-    except Exception:
-        return None
+    if create or _collection_cache is None:
+        from .config import get_palace_collection
+
+        _collection_cache = get_palace_collection(_config.palace_path, create=create)
+    return _collection_cache
 
 
 def _no_palace():
@@ -812,12 +810,15 @@ def handle_request(request):
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
             }
-        except Exception:
+        except Exception as e:
+            # Protocol boundary: the real type and message are the caller's only
+            # clue (a wrong chromadb, a corrupt store, an unreadable segment) —
+            # never collapse them to an opaque "Internal tool error".
             logger.exception(f"Tool error in {tool_name}")
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
+                "error": {"code": -32000, "message": f"{type(e).__name__}: {e}"},
             }
 
     return {

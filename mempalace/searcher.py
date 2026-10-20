@@ -10,7 +10,7 @@ import logging
 import os
 from pathlib import Path
 
-import chromadb
+from .config import get_palace_collection
 
 logger = logging.getLogger("mempalace_mcp")
 
@@ -24,10 +24,8 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect).
     """
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception:
+    col = get_palace_collection(palace_path)
+    if col is None:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         raise SearchError(f"No palace found at {palace_path}")
@@ -98,11 +96,9 @@ def search_memories(
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
     """
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception as e:
-        logger.error("No palace found at %s: %s", palace_path, e)
+    col = get_palace_collection(palace_path)
+    if col is None:
+        logger.error("No palace found at %s", palace_path)
         return {
             "error": "No palace found",
             "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
@@ -209,29 +205,25 @@ def hybrid_search(
             }
         kw_results = fts.search(query, wing=wing, room=room, limit=n_results)
         # Fetch full documents from ChromaDB for keyword hits
-        try:
-            from .config import get_palace_collection
-            col = get_palace_collection(palace_path)
-            if col and kw_results:
-                ids = [r["drawer_id"] for r in kw_results]
-                full = col.get(ids=ids, include=["documents", "metadatas"])
-                doc_map = {did: (doc, meta) for did, doc, meta in zip(
-                    full["ids"], full["documents"], full["metadatas"]
-                )}
-                hits = []
-                for r in kw_results:
-                    doc, meta = doc_map.get(r["drawer_id"], ("", {}))
-                    hits.append({
-                        "text": doc,
-                        "wing": meta.get("wing", "unknown"),
-                        "room": meta.get("room", "unknown"),
-                        "source_file": Path(meta.get("source_file", "?")).name,
-                        "match_type": "keyword",
-                        "keyword_snippet": r.get("snippet", ""),
-                    })
-                return {"query": query, "mode": "keyword", "results": hits}
-        except Exception:
-            pass
+        col = get_palace_collection(palace_path)
+        if col and kw_results:
+            ids = [r["drawer_id"] for r in kw_results]
+            full = col.get(ids=ids, include=["documents", "metadatas"])
+            doc_map = {did: (doc, meta) for did, doc, meta in zip(
+                full["ids"], full["documents"], full["metadatas"]
+            )}
+            hits = []
+            for r in kw_results:
+                doc, meta = doc_map.get(r["drawer_id"], ("", {}))
+                hits.append({
+                    "text": doc,
+                    "wing": meta.get("wing", "unknown"),
+                    "room": meta.get("room", "unknown"),
+                    "source_file": Path(meta.get("source_file", "?")).name,
+                    "match_type": "keyword",
+                    "keyword_snippet": r.get("snippet", ""),
+                })
+            return {"query": query, "mode": "keyword", "results": hits}
         return {"query": query, "mode": "keyword", "results": []}
 
     # Semantic-only mode (or hybrid fallback when no FTS)
@@ -262,18 +254,14 @@ def hybrid_search(
 
     # Collect top N results with full text
     # Semantic results already have full text; keyword results need ChromaDB lookup
-    try:
-        from .config import get_palace_collection
-        col = get_palace_collection(palace_path)
-        kw_doc_map = {}
-        if col and kw_results:
-            kw_ids_list = [r["drawer_id"] for r in kw_results]
-            full = col.get(ids=kw_ids_list, include=["documents", "metadatas"])
-            kw_doc_map = {did: (doc, meta) for did, doc, meta in zip(
-                full["ids"], full["documents"], full["metadatas"]
-            )}
-    except Exception:
-        kw_doc_map = {}
+    col = get_palace_collection(palace_path)
+    kw_doc_map = {}
+    if col and kw_results:
+        kw_ids_list = [r["drawer_id"] for r in kw_results]
+        full = col.get(ids=kw_ids_list, include=["documents", "metadatas"])
+        kw_doc_map = {did: (doc, meta) for did, doc, meta in zip(
+            full["ids"], full["documents"], full["metadatas"]
+        )}
 
     hits = []
     sem_by_id = {h["drawer_id"]: h for h in semantic_hits}

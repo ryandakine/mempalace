@@ -33,9 +33,9 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from datetime import datetime
 
-import chromadb
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from mempalace.config import open_palace_client  # noqa: E402
 
 # ── Optional bge-large embeddings ────────────────────────────────────────────
 _fastembed_model = None
@@ -710,7 +710,7 @@ def run_benchmark(
         palace_path = os.path.join(tmpdir, "palace")
 
         try:
-            client = chromadb.PersistentClient(path=palace_path)
+            client = open_palace_client(palace_path)
             collection = client.create_collection("mempal_drawers")
 
             if mode == "aaak":

@@ -15,8 +15,6 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-import chromadb
-
 READABLE_EXTENSIONS = {
     ".txt",
     ".md",
@@ -656,10 +654,10 @@ def mine(
 
 def status(palace_path: str):
     """Show what's been filed in the palace."""
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception:
+    from .config import get_palace_collection
+
+    col = get_palace_collection(palace_path)
+    if col is None:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         return
