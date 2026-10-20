@@ -578,7 +578,10 @@ def test_collection_or_none_on_1x_shaped_chromadb(monkeypatch):
     from mempalace.config import collection_or_none
 
     errs = _one_x_errors_module()
+    # `import chromadb.errors as errors` binds through the package attribute,
+    # so the stub must replace both the attribute and the sys.modules entry.
     monkeypatch.setitem(sys.modules, "chromadb.errors", errs)
+    monkeypatch.setattr(chromadb, "errors", errs)
 
     class Missing:
         def get_collection(self, name):
@@ -591,7 +594,10 @@ def test_collection_or_none_on_1x_shaped_chromadb(monkeypatch):
 
 def test_escape_hatch_reads_through_collection_lookup_on_1x(monkeypatch, tmp_path):
     errs = _one_x_errors_module()
+    # `import chromadb.errors as errors` binds through the package attribute,
+    # so the stub must replace both the attribute and the sys.modules entry.
     monkeypatch.setitem(sys.modules, "chromadb.errors", errs)
+    monkeypatch.setattr(chromadb, "errors", errs)
     monkeypatch.setattr(chromadb, "__version__", "1.4.0")
     monkeypatch.setenv("MEMPALACE_ALLOW_ANY_CHROMADB", "1")
 
