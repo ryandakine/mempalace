@@ -175,11 +175,22 @@ def get_palace_collection(palace_path: str, create: bool = False):
 
 def collection_or_none(client):
     """The palace collection from an already-guarded client, or None iff it does not exist."""
-    from chromadb.errors import InvalidCollectionException
+    import chromadb.errors as errors
 
+    # 0.6.x raises InvalidCollectionException; 1.x removed it and raises NotFoundError.
+    # Resolve whichever the installed chromadb provides so the deliberate-migration
+    # escape hatch (MEMPALACE_ALLOW_ANY_CHROMADB=1) still reads on a newer line.
+    missing = tuple(
+        t
+        for t in (
+            getattr(errors, "InvalidCollectionException", None),
+            getattr(errors, "NotFoundError", None),
+        )
+        if t is not None
+    )
     try:
         return client.get_collection(DEFAULT_COLLECTION_NAME)
-    except InvalidCollectionException:
+    except missing:
         return None
 
 

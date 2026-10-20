@@ -556,3 +556,50 @@ def test_search_memories_returns_real_error_on_query_failure(monkeypatch, tmp_pa
     )
     resp = searcher.search_memories("hello", str(tmp_path))
     assert resp["error"] == "Search error: post-open failure"
+
+
+# --- Found by Codex round 3: the escape hatch must work on a 1.x chromadb ------
+# chromadb 1.x removed InvalidCollectionException (missing -> NotFoundError), so a
+# hard import of the 0.6 name broke MEMPALACE_ALLOW_ANY_CHROMADB=1 before any
+# collection lookup — the one scenario the hatch exists for.
+
+
+def _one_x_errors_module():
+    mod = types.ModuleType("chromadb.errors")
+
+    class NotFoundError(Exception):
+        pass
+
+    mod.NotFoundError = NotFoundError
+    return mod
+
+
+def test_collection_or_none_on_1x_shaped_chromadb(monkeypatch):
+    from mempalace.config import collection_or_none
+
+    errs = _one_x_errors_module()
+    monkeypatch.setitem(sys.modules, "chromadb.errors", errs)
+
+    class Missing:
+        def get_collection(self, name):
+            raise errs.NotFoundError(f"Collection [{name}] does not exist")
+
+    assert collection_or_none(Missing()) is None
+    with pytest.raises(RuntimeError, match="corrupt segment"):
+        collection_or_none(_CorruptClient())
+
+
+def test_escape_hatch_reads_through_collection_lookup_on_1x(monkeypatch, tmp_path):
+    errs = _one_x_errors_module()
+    monkeypatch.setitem(sys.modules, "chromadb.errors", errs)
+    monkeypatch.setattr(chromadb, "__version__", "1.4.0")
+    monkeypatch.setenv("MEMPALACE_ALLOW_ANY_CHROMADB", "1")
+
+    class OneXClient:
+        def get_collection(self, name):
+            raise errs.NotFoundError(f"Collection [{name}] does not exist")
+
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda **_: OneXClient())
+    # Before the fix this raised ImportError (0.6-only exception name) instead of
+    # reading through and reporting a genuinely missing collection.
+    assert get_palace_collection(str(tmp_path)) is None
