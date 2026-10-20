@@ -6,7 +6,9 @@ Priority: env vars > config file (~/.mempalace/config.json) > defaults
 
 import json
 import os
+import sys
 from pathlib import Path
+from typing import Optional
 
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
@@ -14,6 +16,64 @@ DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 # ChromaDB collection metadata — use cosine distance for correct similarity scoring.
 # The default (L2/Euclidean) produces unbounded distances that break `1 - dist` scoring.
 CHROMA_COLLECTION_METADATA = {"hnsw:space": "cosine"}
+
+# The palace's on-disk format is tied to the chromadb 0.6 line (see the pyproject pin).
+# Opening it with another line — notably 1.x — silently rewrites the HNSW vector segment
+# into a format 0.6 can't instantiate, killing semantic search until a full
+# `mempalace repair`. Every mempalace open goes through open_palace_client() so the
+# installed runtime can never drift onto the store unnoticed.
+SUPPORTED_CHROMADB_LINE = (0, 6)
+ALLOW_ANY_CHROMADB_ENV = "MEMPALACE_ALLOW_ANY_CHROMADB"
+
+
+class UnsupportedChromaDBError(RuntimeError):
+    """Installed chromadb is outside the line this palace format supports."""
+
+
+def require_supported_chromadb(version: Optional[str] = None) -> str:
+    """Raise UnsupportedChromaDBError unless `version` (default: installed) is 0.6.x.
+
+    Set MEMPALACE_ALLOW_ANY_CHROMADB=1 to bypass for a deliberate migration.
+    """
+    if version is None:
+        # The guard must own its own resolution step: a chromadb that cannot be
+        # imported (broken venv, ABI mismatch) or has no __version__ is strictly
+        # worse than the wrong line, and must surface as the same loud error —
+        # never as a bare ImportError that broad handlers turn into "no palace".
+        try:
+            import chromadb
+
+            version = chromadb.__version__
+        except Exception as e:  # ImportError, missing __version__, chromadb's own import-time RuntimeError (old sqlite)
+            raise UnsupportedChromaDBError(
+                f"chromadb could not be imported in {sys.executable} ({e!r}); "
+                "use the pinned mempalace environment."
+            ) from e
+    if os.environ.get(ALLOW_ANY_CHROMADB_ENV) == "1":
+        return version
+    parts = version.split(".")
+    try:
+        line = (int(parts[0]), int(parts[1]))
+    except (IndexError, ValueError):
+        line = None
+    if line != SUPPORTED_CHROMADB_LINE:
+        want = ".".join(str(n) for n in SUPPORTED_CHROMADB_LINE)
+        raise UnsupportedChromaDBError(
+            f"chromadb {version} (in {sys.executable}) is not supported for this palace; "
+            f"need {want}.x. Opening the store with another line rewrites its vector index "
+            f"and breaks {want}.x. Use the pinned mempalace environment, or set "
+            f"{ALLOW_ANY_CHROMADB_ENV}=1 only for a deliberate migration."
+        )
+    return version
+
+
+def open_palace_client(palace_path: str):
+    """The one place a ChromaDB client is constructed. Guards the chromadb version first."""
+    require_supported_chromadb()
+    import chromadb
+
+    return chromadb.PersistentClient(path=palace_path)
+
 
 DEFAULT_TOPIC_WINGS = [
     "emotions",
@@ -92,25 +152,34 @@ def get_palace_collection(palace_path: str, create: bool = False):
 
     All callers should use this instead of raw chromadb.PersistentClient.
     Ensures consistent cosine distance metric across all creation sites.
+    Need a bare client? Use open_palace_client() — never chromadb.PersistentClient.
 
     Args:
         palace_path: Path to the palace data directory.
         create: If True, create the collection if it doesn't exist.
 
     Returns:
-        ChromaDB collection, or None if collection doesn't exist and create=False.
+        ChromaDB collection, or None only if the collection does not exist yet
+        (create=False). Any other chromadb error — a corrupt or unreadable
+        store, an unsupported chromadb — propagates: an operator must never see
+        "no palace" for a palace that exists and is broken.
     """
-    import chromadb
-
     os.makedirs(palace_path, exist_ok=True)
-    client = chromadb.PersistentClient(path=palace_path)
+    client = open_palace_client(palace_path)
     if create:
         return client.get_or_create_collection(
             DEFAULT_COLLECTION_NAME, metadata=CHROMA_COLLECTION_METADATA
         )
+    return collection_or_none(client)
+
+
+def collection_or_none(client):
+    """The palace collection from an already-guarded client, or None iff it does not exist."""
+    from chromadb.errors import InvalidCollectionException
+
     try:
         return client.get_collection(DEFAULT_COLLECTION_NAME)
-    except Exception:
+    except InvalidCollectionException:
         return None
 
 

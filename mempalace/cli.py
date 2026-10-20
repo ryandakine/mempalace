@@ -157,8 +157,9 @@ def cmd_status(args):
 
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
-    import chromadb
     import shutil
+
+    from .config import collection_or_none, open_palace_client
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
@@ -172,15 +173,14 @@ def cmd_repair(args):
     print(f"  Palace: {palace_path}")
 
     # Try to read existing drawers
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-        total = col.count()
-        print(f"  Drawers found: {total}")
-    except Exception as e:
-        print(f"  Error reading palace: {e}")
+    client = open_palace_client(palace_path)
+    col = collection_or_none(client)
+    if col is None:
+        print("  No collection found in this palace.")
         print("  Cannot recover — palace may need to be re-mined from source files.")
         return
+    total = col.count()
+    print(f"  Drawers found: {total}")
 
     if total == 0:
         print("  Nothing to repair.")
@@ -229,9 +229,9 @@ def cmd_repair(args):
 
 def cmd_migrate(args):
     """Migrate palace to cosine distance metric and consolidate storage."""
-    import chromadb
     import shutil
-    from .config import CHROMA_COLLECTION_METADATA
+
+    from .config import CHROMA_COLLECTION_METADATA, collection_or_none, open_palace_client
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
@@ -245,14 +245,13 @@ def cmd_migrate(args):
     print(f"  Palace: {palace_path}")
 
     # Check if migration is needed
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-        total = col.count()
-        print(f"  Drawers found: {total}")
-    except Exception as e:
-        print(f"  Error reading palace: {e}")
+    client = open_palace_client(palace_path)
+    col = collection_or_none(client)
+    if col is None:
+        print("  No collection found in this palace.")
         return
+    total = col.count()
+    print(f"  Drawers found: {total}")
 
     if total == 0:
         print("  Empty palace. Nothing to migrate.")
@@ -381,7 +380,7 @@ def cmd_instructions(args):
 
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
-    import chromadb
+    from .config import collection_or_none, open_palace_client
     from .dialect import Dialect
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
@@ -401,10 +400,9 @@ def cmd_compress(args):
         dialect = Dialect()
 
     # Connect to palace
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception:
+    client = open_palace_client(palace_path)
+    col = collection_or_none(client)
+    if col is None:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         sys.exit(1)
@@ -696,7 +694,17 @@ def main():
         "check-index": cmd_check_index,
         "status": cmd_status,
     }
-    dispatch[args.command](args)
+    try:
+        dispatch[args.command](args)
+    except Exception as e:
+        # Loud but clean: the real type and message on one line, no traceback
+        # (set MEMPALACE_DEBUG=1 for the full trace). A corrupt store must
+        # name itself — never read as "no palace" — but a user running
+        # `mempalace repair` should not get 30 lines of chromadb internals.
+        if os.environ.get("MEMPALACE_DEBUG") == "1":
+            raise
+        print(f"\n  Error: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

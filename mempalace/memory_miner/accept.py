@@ -35,12 +35,14 @@ def _log_decision_best_effort(prop: Dict, action: str) -> None:
     """
     try:
         record_decision(
-            prop.get("id"), action,
+            prop.get("id"),
+            action,
             type=prop.get("type"),
             score=prop.get("confidence"),
         )
     except Exception:  # pragma: no cover - record_decision is already guarded
         pass
+
 
 # MEMORY.md section headers per store type.
 SECTION = {
@@ -164,8 +166,9 @@ def _short_desc(desc: str, width: int = 100) -> str:
     return desc[:width].rstrip()
 
 
-def update_memory_index(index_path: Path, filename: str, name: str,
-                        description: str, store_type: str) -> None:
+def update_memory_index(
+    index_path: Path, filename: str, name: str, description: str, store_type: str
+) -> None:
     """Idempotent MEMORY.md pointer (plan §4.7): replace-in-place by filename slug.
 
     If a pointer line for ``filename`` already exists anywhere, it is replaced in
@@ -265,9 +268,14 @@ def load_queue(jsonl_path: Path) -> Dict[str, dict]:
     return out
 
 
-def select_proposals(queue: Dict[str, dict], *, ids: List[str] = None,
-                     above: float = None, type_filter: str = None,
-                     accepted_ids: set = None) -> List[dict]:
+def select_proposals(
+    queue: Dict[str, dict],
+    *,
+    ids: List[str] = None,
+    above: float = None,
+    type_filter: str = None,
+    accepted_ids: set = None,
+) -> List[dict]:
     """Resolve which queued proposals to accept (plan §4.7).
 
     Explicit ids OR (--above conf [+ --type]). Already-accepted ids are skipped.
@@ -308,8 +316,18 @@ def accept(
     The ONLY function in the package that writes a memory file.
     """
     memory_dir = Path(memory_dir) if memory_dir else default_memory_dir()
-    ledger_path = Path(ledger_path) if ledger_path else (memory_dir.parent / "memory-miner-accepted.jsonl")
+    ledger_path = (
+        Path(ledger_path) if ledger_path else (memory_dir.parent / "memory-miner-accepted.jsonl")
+    )
     index_path = Path(index_path) if index_path else (memory_dir / "MEMORY.md")
+
+    if dual_write_mempalace:
+        # Preflight the palace guard BEFORE any acceptance write. Discovering a
+        # wrong chromadb mid-loop would leave the ledger committed with no palace
+        # copy, and a retry would then skip that proposal as already accepted.
+        from ..config import require_supported_chromadb
+
+        require_supported_chromadb()
 
     from .emit import load_accepted_ids
 
@@ -331,17 +349,24 @@ def accept(
             filename = target.name
             changed = enrich_memory_file(target, prop)
             update_memory_index(
-                index_path, filename, prop.get("name", ""),
-                prop.get("description", ""), prop.get("type", "reference"),
+                index_path,
+                filename,
+                prop.get("name", ""),
+                prop.get("description", ""),
+                prop.get("type", "reference"),
             )
             append_ledger(ledger_path, prop, filename)
             if dual_write_mempalace and changed:
                 _dual_write(prop, filename)
             _log_decision_best_effort(prop, "merged")
-            results.append({
-                "id": prop.get("id"), "file": filename,
-                "type": prop.get("type"), "action": "merge",
-            })
+            results.append(
+                {
+                    "id": prop.get("id"),
+                    "file": filename,
+                    "type": prop.get("type"),
+                    "action": "merge",
+                }
+            )
             continue
 
         # CREATE: write a fresh memory file.
@@ -349,17 +374,24 @@ def accept(
         mem_path = memory_dir / filename
         _atomic_write(mem_path, render_memory_md(prop))
         update_memory_index(
-            index_path, filename, prop.get("name", ""),
-            prop.get("description", ""), prop.get("type", "reference"),
+            index_path,
+            filename,
+            prop.get("name", ""),
+            prop.get("description", ""),
+            prop.get("type", "reference"),
         )
         append_ledger(ledger_path, prop, filename)
         if dual_write_mempalace:
             _dual_write(prop, filename)
         _log_decision_best_effort(prop, "accepted")
-        results.append({
-            "id": prop.get("id"), "file": filename,
-            "type": prop.get("type"), "action": "create",
-        })
+        results.append(
+            {
+                "id": prop.get("id"),
+                "file": filename,
+                "type": prop.get("type"),
+                "action": "create",
+            }
+        )
     return results
 
 
@@ -386,7 +418,10 @@ def _merge_target(prop: Dict, memory_dir: Path):
 
 
 def _dual_write(prop: Dict, filename: str) -> None:
-    """Optional MemPalace dual-write (OFF by default). Best-effort, never fatal."""
+    """Optional MemPalace dual-write (OFF by default). Best-effort, never fatal —
+    except an unsupported chromadb, which must never be silent."""
+    from ..config import UnsupportedChromaDBError
+
     try:  # pragma: no cover - optional, requires chromadb + palace config
         from ..convo_miner import get_collection
         from ..config import MempalaceConfig
@@ -395,13 +430,17 @@ def _dual_write(prop: Dict, filename: str) -> None:
         col.add(
             documents=[prop.get("body", "")],
             ids=[f"drawer_memory_{prop.get('id')}"],
-            metadatas=[{
-                "wing": "memory",
-                "room": prop.get("type", "reference"),
-                "source_file": filename,
-                "added_by": "memory_miner",
-                "filed_at": datetime.now().isoformat(),
-            }],
+            metadatas=[
+                {
+                    "wing": "memory",
+                    "room": prop.get("type", "reference"),
+                    "source_file": filename,
+                    "added_by": "memory_miner",
+                    "filed_at": datetime.now().isoformat(),
+                }
+            ],
         )
+    except UnsupportedChromaDBError:
+        raise
     except Exception:
         pass

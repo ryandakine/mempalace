@@ -33,12 +33,12 @@ from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
-import chromadb
 
 # Bypass SSL for restricted environments
 ssl._create_default_https_context = ssl._create_unverified_context
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from mempalace.config import open_palace_client  # noqa: E402
 
 HF_BASE = "https://huggingface.co/datasets/Salesforce/ConvoMem/resolve/main/core_benchmark/evidence_questions"
 
@@ -178,7 +178,7 @@ def retrieve_for_item(item, top_k=10, mode="raw"):
     palace_path = os.path.join(tmpdir, "palace")
 
     try:
-        client = chromadb.PersistentClient(path=palace_path)
+        client = open_palace_client(palace_path)
         collection = client.create_collection("mempal_drawers")
 
         # Optionally compress
